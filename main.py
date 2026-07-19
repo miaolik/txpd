@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """腾讯频道插件入口：指令 / Web 管理面板 / 定时发帖调度器。"""
 
+from . import env_setup  # noqa: F401
 from . import 腾讯频道  # noqa: F401
 from . import feed_scheduler  # noqa: F401
 from . import web_panel  # noqa: F401

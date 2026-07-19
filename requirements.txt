@@ -1,0 +1,4 @@
+# txpd 插件 Python 依赖（框架加载时自动 pip install）
+aiohttp
+# 说明：tencent-channel-cli 是 npm 包（非 pip），Linux/macOS 下插件加载时会自动执行
+# npm install -g tencent-channel-cli 补全；Windows 下使用插件目录内置 tencent-channel-cli.exe。
