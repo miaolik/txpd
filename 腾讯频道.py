@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+import functools
 import json
 import re
 import subprocess
@@ -30,6 +31,60 @@ def _resolve_cli() -> Optional[str]:
     return None
 PLUGIN_SETTINGS = BASE_DIR / "plugin_settings.json"
 TOKEN_STORE = BASE_DIR / "token_store.json"
+ADMINS_FILE = BASE_DIR / "admins.txt"
+DEFAULT_ADMINS = ["538389445D765D2988BFE31506C54799"]
+
+
+def _load_admins() -> List[str]:
+    """读取插件管理员列表（一行一个，# 开头为注释），文件不存在时用默认管理员初始化。"""
+    try:
+        if not ADMINS_FILE.exists():
+            ADMINS_FILE.write_text("\n".join(DEFAULT_ADMINS) + "\n", encoding="utf-8")
+        lines = ADMINS_FILE.read_text(encoding="utf-8").splitlines()
+        admins = [x.strip() for x in lines if x.strip() and not x.strip().startswith("#")]
+        return admins or list(DEFAULT_ADMINS)
+    except Exception:
+        return list(DEFAULT_ADMINS)
+
+
+def _save_admins(admins: List[str]) -> bool:
+    cleaned: List[str] = []
+    for item in admins:
+        value = str(item or "").strip()
+        if value and value not in cleaned:
+            cleaned.append(value)
+    if not cleaned:
+        return False
+    try:
+        ADMINS_FILE.write_text("\n".join(cleaned) + "\n", encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def _is_plugin_admin(user_id: Any) -> bool:
+    uid = str(user_id or "").strip()
+    if not uid:
+        return False
+    return uid.upper() in {a.upper() for a in _load_admins()}
+
+
+def admin_handler(pattern: str, **kwargs):
+    """同 @handler，但仅允许 admins.txt 中的插件管理员触发。"""
+    kwargs.pop("owner_only", None)
+
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapped(event, match):
+            if not _is_plugin_admin(getattr(event, "user_id", "")):
+                return
+            return await func(event, match)
+
+        return handler(pattern, **kwargs)(wrapped)
+
+    return decorator
+
+
 ENCODE_CMD_INPUT = False
 
 # 本地分页每页显示条数
@@ -77,45 +132,45 @@ WRITE_ACTIONS = {
 
 
 
-@handler(r"^频道帮助$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道帮助$", ignore_at_check=True)
 async def handle_help(event, match):
     await event.reply(_help_text())
 
-@handler(r"^频道清理缓存$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道清理缓存$", ignore_at_check=True)
 async def handle_clear_cache(event, match):
     store = _load_token_store()
     token_fp = str(store.get("__token_fp__") or "").strip()
     _save_token_store({"__token_fp__": token_fp} if token_fp else {})
     await event.reply("已清理频道缓存（self id 与短令牌）")
 
-@handler(r"^频道清理短令牌$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道清理短令牌$", ignore_at_check=True)
 async def handle_clear_short_tokens(event, match):
     store = _load_token_store()
     keep = {k: v for k, v in store.items() if str(k).startswith("__")}
     _save_token_store(keep)
     await event.reply("已清理短令牌缓存")
 
-@handler(r"^频道开启预演$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道开启预演$", ignore_at_check=True)
 async def handle_preview_on(event, match):
     _set_switch("preview_enabled", True)
     await event.reply("✅ 已开启预演模式，有风险的写操作会自动追加 --dry-run，仅验证参数，不会实际执行。")
 
-@handler(r"^频道关闭预演$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道关闭预演$", ignore_at_check=True)
 async def handle_preview_off(event, match):
     _set_switch("preview_enabled", False)
     await event.reply("✅ 已关闭预演模式。")
 
-@handler(r"^频道开启调试$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道开启调试$", ignore_at_check=True)
 async def handle_debug_on(event, match):
     _set_switch("debug_enabled", True)
     await event.reply("✅ 已开启调试模式，后续会在消息末尾追加返回 JSON 大代码块。")
 
-@handler(r"^频道关闭调试$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道关闭调试$", ignore_at_check=True)
 async def handle_debug_off(event, match):
     _set_switch("debug_enabled", False)
     await event.reply("✅ 已关闭调试模式，后续仅显示文本结果。")
 
-@handler(r"^频道配置token\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道配置token\s+.+$", ignore_at_check=True)
 async def handle_token_setup(event, match):
     parts = _text(event).split(None, 1)
     if len(parts) < 2 or not parts[1].strip():
@@ -125,7 +180,7 @@ async def handle_token_setup(event, match):
     _invalidate_self_user_cache(_fingerprint_token(token))
     await _reply_cli(event, ["token", "setup", token], title="配置 token")
 
-@handler(r"^频道自检$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道自检$", ignore_at_check=True)
 async def handle_self_check(event, match):
     settings = _read_plugin_settings()
     store = _load_token_store()
@@ -200,7 +255,7 @@ async def handle_self_check(event, match):
         lines.append(_json_block(normalized_output))
     await event.reply("\n".join([x for x in lines if x is not None]))
 
-@handler(r"^频道列表(?:\s+\S+)?$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道列表(?:\s+\S+)?$", ignore_at_check=True)
 async def handle_guild_list(event, match):
     parts = _parts(event)
     token = parts[1] if len(parts) >= 2 else None
@@ -237,7 +292,7 @@ async def handle_guild_list(event, match):
         _refresh_guild_roles(payload)
     await event.reply(_render_result("频道列表", ok, output, ["manage", "get-my-join-guild-info", "--json"]))
 
-@handler(r"^频道资料\s+\S+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道资料\s+\S+$", ignore_at_check=True)
 async def handle_guild_info(event, match):
     guild_id = _parts(event)[1]
     # 同时获取频道资料和分享链接
@@ -260,7 +315,7 @@ async def handle_guild_info(event, match):
     await event.reply(_render_result("频道资料", ok_info, _normalize_rate_limit(output_info),
                                 ["manage", "get-guild-info", "--guild-id", guild_id, "--json"], guild_id=guild_id))
 
-@handler(r"^频道解析\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道解析\s+.+$", ignore_at_check=True)
 async def handle_share_parse(event, match):
     text = _text(event)
     # 尝试从消息中提取 URL（支持 pd.qq.com 链接）
@@ -276,12 +331,12 @@ async def handle_share_parse(event, match):
         url = parts[1].strip()
     await _reply_cli(event, ["manage", "get-share-info", "--url", url, "--json"], title="解析分享链接")
 
-@handler(r"^频道版块\s+\S+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道版块\s+\S+$", ignore_at_check=True)
 async def handle_channel_list(event, match):
     guild_id = _parts(event)[1]
     await _reply_cli(event, ["manage", "get-guild-channel-list", "--guild-id", guild_id, "--json"], title="频道版块", guild_id=guild_id)
 
-@handler(r"^频道创建版块\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道创建版块\s+.+$", ignore_at_check=True)
 async def handle_create_channel(event, match):
     m = re.match(r"^频道创建版块\s+(\S+)\s+(.+)$", _text(event), re.S)
     if not m:
@@ -290,7 +345,7 @@ async def handle_create_channel(event, match):
     guild_id, channel_name = m.groups()
     await _reply_cli(event, ["manage", "create-channel", "--guild-id", guild_id, "--channel-name", channel_name.strip(), "--json"], title="创建版块", guild_id=guild_id)
 
-@handler(r"^频道修改版块\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道修改版块\s+.+$", ignore_at_check=True)
 async def handle_modify_channel(event, match):
     m = re.match(r"^频道修改版块\s+(\S+)\s+(\S+)\s+(.+)$", _text(event), re.S)
     if not m:
@@ -299,7 +354,7 @@ async def handle_modify_channel(event, match):
     guild_id, channel_id, channel_name = m.groups()
     await _reply_cli(event, ["manage", "modify-channel", "--guild-id", guild_id, "--channel-id", channel_id, "--channel-name", channel_name.strip(), "--json"], title="修改版块", guild_id=guild_id)
 
-@handler(r"^频道删除版块\s+\S+\s+\S+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道删除版块\s+\S+\s+\S+$", ignore_at_check=True)
 async def handle_delete_channel(event, match):
     parts = _parts(event)
     if len(parts) < 3:
@@ -308,7 +363,7 @@ async def handle_delete_channel(event, match):
     guild_id, channel_id = parts[1], parts[2]
     await _reply_cli(event, ["manage", "delete-channel", "--guild-id", guild_id, "--channel-ids", channel_id, "--json"], title="删除版块", guild_id=guild_id)
 
-@handler(r"^频道建频道\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道建频道\s+.+$", ignore_at_check=True)
 async def handle_create_theme_guild(event, match):
     parts = _parts(event)
     if len(parts) < 3:
@@ -318,7 +373,7 @@ async def handle_create_theme_guild(event, match):
     theme = " ".join(parts[2:]).strip()
     await _reply_cli(event, ["manage", "create-theme-private-guild", "--image-path", image_path, "--theme", theme, "--json"], title="按主题创建频道")
 
-@handler(r"^频道创建\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道创建\s+.+$", ignore_at_check=True)
 async def handle_create_custom_guild(event, match):
     m = re.match(r"^频道创建\s+(.+?)\s+(公开|私密|public|private)\s+(.+?)\s*\|\s*(.+)$", _text(event), re.S)
     if not m:
@@ -328,28 +383,28 @@ async def handle_create_custom_guild(event, match):
     ctype = "private" if community_type in {"私密", "private"} else "public"
     await _reply_cli(event, ["manage", "create-theme-private-guild", "--image-path", image_path.strip(), "--community-type", ctype, "--guild-name", guild_name.strip(), "--guild-profile", guild_profile.strip(), "--json"], title="创建频道")
 
-@handler(r"^频道改名\s+\S+\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道改名\s+\S+\s+.+$", ignore_at_check=True)
 async def handle_update_guild_name(event, match):
     parts = _parts(event)
     guild_id = parts[1]
     name = " ".join(parts[2:]).strip()
     await _reply_cli(event, ["manage", "update-guild-info", "--guild-id", guild_id, "--guild-name", name, "--json"], title="频道改名", guild_id=guild_id)
 
-@handler(r"^频道改简介\s+\S+\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道改简介\s+\S+\s+.+$", ignore_at_check=True)
 async def handle_update_guild_profile(event, match):
     parts = _parts(event)
     guild_id = parts[1]
     profile = " ".join(parts[2:]).strip()
     await _reply_cli(event, ["manage", "update-guild-info", "--guild-id", guild_id, "--guild-profile", profile, "--json"], title="频道改简介", guild_id=guild_id)
 
-@handler(r"^频道改头像\s+\S+\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道改头像\s+\S+\s+.+$", ignore_at_check=True)
 async def handle_upload_guild_avatar(event, match):
     parts = _parts(event)
     guild_id = parts[1]
     image_path = " ".join(parts[2:]).strip()
     await _reply_cli(event, ["manage", "upload-guild-avatar", "--guild-id", guild_id, "--image-path", image_path, "--json"], title="频道改头像", guild_id=guild_id)
 
-@handler(r"^频道成员\s+\S+(?:\s+\S+)?$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道成员\s+\S+(?:\s+\S+)?$", ignore_at_check=True)
 async def handle_member_list(event, match):
     parts = _parts(event)
     guild_id = parts[1]
@@ -394,14 +449,14 @@ async def handle_member_list(event, match):
             args += ["--next-page-token", next_page_token]
     await _reply_cli(event, args, title="频道成员", guild_id=guild_id)
 
-@handler(r"^频道搜成员\s+\S+\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道搜成员\s+\S+\s+.+$", ignore_at_check=True)
 async def handle_member_search(event, match):
     parts = _parts(event)
     guild_id = parts[1]
     keyword = " ".join(parts[2:]).strip()
     await _reply_cli(event, ["manage", "guild-member-search", "--guild-id", guild_id, "--keyword", keyword, "--json"], title="频道搜成员", guild_id=guild_id)
 
-@handler(r"^频道用户资料(?:\s+\S+)?(?:\s+\S+)?$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道用户资料(?:\s+\S+)?(?:\s+\S+)?$", ignore_at_check=True)
 async def handle_user_info(event, match):
     parts = _parts(event)
     if len(parts) == 1:
@@ -415,17 +470,17 @@ async def handle_user_info(event, match):
     tiny_id = parts[2]
     await _reply_cli(event, ["manage", "get-user-info", "--guild-id", guild_id, "--tiny-id", tiny_id, "--json"], title="用户资料", guild_id=guild_id)
 
-@handler(r"^频道设置管理员\s+\S+\s+\S+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道设置管理员\s+\S+\s+\S+$", ignore_at_check=True)
 async def handle_add_admin(event, match):
     guild_id, tiny_id = _parts(event)[1], _parts(event)[2]
     await _reply_cli(event, ["manage", "add-admin", "--guild-id", guild_id, "--tiny-ids", tiny_id, "--yes", "--json"], title="设置管理员", guild_id=guild_id)
 
-@handler(r"^频道取消管理员\s+\S+\s+\S+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道取消管理员\s+\S+\s+\S+$", ignore_at_check=True)
 async def handle_remove_admin(event, match):
     guild_id, tiny_id = _parts(event)[1], _parts(event)[2]
     await _reply_cli(event, ["manage", "remove-admin", "--guild-id", guild_id, "--tiny-ids", tiny_id, "--yes", "--json"], title="取消管理员", guild_id=guild_id)
 
-@handler(r"^频道禁言\s+\S+\s+\S+\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道禁言\s+\S+\s+\S+\s+.+$", ignore_at_check=True)
 async def handle_shut_up_member(event, match):
     m = re.match(r"^频道禁言\s+(\S+)\s+(\S+)\s+(.+)$", _text(event), re.S)
     if not m:
@@ -438,17 +493,17 @@ async def handle_shut_up_member(event, match):
         return
     await _reply_cli(event, ["manage", "modify-member-shut-up", "--guild-id", guild_id, "--tiny-id", tiny_id, "--time-stamp", str(timestamp), "--json"], title="设置禁言", guild_id=guild_id)
 
-@handler(r"^频道解除禁言\s+\S+\s+\S+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道解除禁言\s+\S+\s+\S+$", ignore_at_check=True)
 async def handle_unshut_up_member(event, match):
     guild_id, tiny_id = _parts(event)[1], _parts(event)[2]
     await _reply_cli(event, ["manage", "modify-member-shut-up", "--guild-id", guild_id, "--tiny-id", tiny_id, "--time-stamp", "0", "--json"], title="解除禁言", guild_id=guild_id)
 
-@handler(r"^频道踢出\s+\S+\s+\S+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道踢出\s+\S+\s+\S+$", ignore_at_check=True)
 async def handle_kick_member(event, match):
     guild_id, tiny_id = _parts(event)[1], _parts(event)[2]
     await _reply_cli(event, ["manage", "kick-guild-member", "--guild-id", guild_id, "--tiny-id", tiny_id, "--yes", "--json"], title="踢出成员", guild_id=guild_id)
 
-@handler(r"^频道搜频道\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道搜频道\s+.+$", ignore_at_check=True)
 async def handle_search_guilds(event, match):
     parts = _parts(event)
     # 支持翻页令牌（g 开头）
@@ -468,7 +523,7 @@ async def handle_search_guilds(event, match):
     keyword = _text(event).split(None, 1)[1].strip()
     await _reply_cli(event, ["manage", "search-guild-content", "--keyword", keyword, "--scope", "channel", "--json"], title="搜频道")
 
-@handler(r"^频道搜作者\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道搜作者\s+.+$", ignore_at_check=True)
 async def handle_search_authors(event, match):
     parts = _parts(event)
     # 支持翻页令牌（g 开头）
@@ -488,7 +543,7 @@ async def handle_search_authors(event, match):
     keyword = _text(event).split(None, 1)[1].strip()
     await _reply_cli(event, ["manage", "search-guild-content", "--keyword", keyword, "--scope", "author", "--json"], title="搜作者")
 
-@handler(r"^频道全局搜帖\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道全局搜帖\s+.+$", ignore_at_check=True)
 async def handle_search_feeds_global(event, match):
     parts = _parts(event)
     # 支持翻页令牌（s 开头）
@@ -508,12 +563,12 @@ async def handle_search_feeds_global(event, match):
     keyword = _text(event).split(None, 1)[1].strip()
     await _reply_cli(event, ["manage", "search-guild-content", "--keyword", keyword, "--scope", "feed", "--json"], title="全局搜帖")
 
-@handler(r"^频道加入\s+\S+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道加入\s+\S+$", ignore_at_check=True)
 async def handle_join_guild(event, match):
     guild_id = _parts(event)[1]
     await _reply_cli(event, ["manage", "join-guild", "--guild-id", guild_id, "--json"], title="加入频道", guild_id=guild_id)
 
-@handler(r"^频道加入附言\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道加入附言\s+.+$", ignore_at_check=True)
 async def handle_join_guild_with_comment(event, match):
     m = re.match(r"^频道加入附言\s+(\S+)\s+(.+)$", _text(event), re.S)
     if not m:
@@ -523,7 +578,7 @@ async def handle_join_guild_with_comment(event, match):
     payload = {"guild_id": guild_id, "join_guild_comment": comment.strip()}
     await _reply_cli_json_stdin(event, ["manage", "join-guild", "--json"], payload, title="加入频道", guild_id=guild_id)
 
-@handler(r"^频道加入答题\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道加入答题\s+.+$", ignore_at_check=True)
 async def handle_join_guild_with_answers(event, match):
     m = re.match(r"^频道加入答题\s+(\S+)\s+(.+)$", _text(event), re.S)
     if not m:
@@ -537,27 +592,27 @@ async def handle_join_guild_with_answers(event, match):
     payload = {"guild_id": guild_id, "join_guild_answers": [{"answer": x} for x in answers]}
     await _reply_cli_json_stdin(event, ["manage", "join-guild", "--json"], payload, title="加入频道", guild_id=guild_id)
 
-@handler(r"^频道加入方式\s+\S+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道加入方式\s+\S+$", ignore_at_check=True)
 async def handle_join_setting(event, match):
     guild_id = _parts(event)[1]
     await _reply_cli(event, ["manage", "get-join-guild-setting", "--guild-id", guild_id, "--json"], title="加入方式", guild_id=guild_id)
 
-@handler(r"^频道设直接加入\s+\S+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道设直接加入\s+\S+$", ignore_at_check=True)
 async def handle_join_setting_direct(event, match):
     guild_id = _parts(event)[1]
     await _reply_cli(event, ["manage", "update-join-guild-setting", "--guild-id", guild_id, "--join-type", "JOIN_GUILD_TYPE_DIRECT", "--json"], title="设置直接加入", guild_id=guild_id)
 
-@handler(r"^频道设审核加入\s+\S+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道设审核加入\s+\S+$", ignore_at_check=True)
 async def handle_join_setting_audit(event, match):
     guild_id = _parts(event)[1]
     await _reply_cli(event, ["manage", "update-join-guild-setting", "--guild-id", guild_id, "--join-type", "JOIN_GUILD_TYPE_ADMIN_AUDIT", "--json"], title="设置审核加入", guild_id=guild_id)
 
-@handler(r"^频道设禁止加入\s+\S+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道设禁止加入\s+\S+$", ignore_at_check=True)
 async def handle_join_setting_disable(event, match):
     guild_id = _parts(event)[1]
     await _reply_cli(event, ["manage", "update-join-guild-setting", "--guild-id", guild_id, "--join-type", "JOIN_GUILD_TYPE_DISABLE", "--json"], title="设置禁止加入", guild_id=guild_id)
 
-@handler(r"^频道加入提问审核\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道加入提问审核\s+.+$", ignore_at_check=True)
 async def handle_join_setting_question_audit(event, match):
     m = re.match(r"^频道加入提问审核\s+(\S+)\s+(.+)$", _text(event), re.S)
     if not m:
@@ -575,7 +630,7 @@ async def handle_join_setting_question_audit(event, match):
     }
     await _reply_cli_json_stdin(event, ["manage", "update-join-guild-setting", "--json"], payload, title="设置提问审核", guild_id=guild_id)
 
-@handler(r"^频道加入多题验证\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道加入多题验证\s+.+$", ignore_at_check=True)
 async def handle_join_setting_multi_question(event, match):
     m = re.match(r"^频道加入多题验证\s+(\S+)\s+(.+)$", _text(event), re.S)
     if not m:
@@ -599,7 +654,7 @@ async def handle_join_setting_multi_question(event, match):
     }
     await _reply_cli_json_stdin(event, ["manage", "update-join-guild-setting", "--json"], payload, title="设置多题验证", guild_id=guild_id)
 
-@handler(r"^频道加入测试题\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道加入测试题\s+.+$", ignore_at_check=True)
 async def handle_join_setting_quiz(event, match):
     m = re.match(r"^频道加入测试题\s+(\S+)\s+(.+?)\s*\|\s*(.+?)\s*\|\s*(.+)$", _text(event), re.S)
     if not m:
@@ -624,7 +679,7 @@ async def handle_join_setting_quiz(event, match):
     }
     await _reply_cli_json_stdin(event, ["manage", "update-join-guild-setting", "--json"], payload, title="设置测试题", guild_id=guild_id)
 
-@handler(r"^频道私信\s+\S+\s+\S+\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道私信\s+\S+\s+\S+\s+.+$", ignore_at_check=True)
 async def handle_push_group_dm(event, match):
     parts = _parts(event)
     source_guild_id = parts[1]
@@ -632,12 +687,12 @@ async def handle_push_group_dm(event, match):
     text = " ".join(parts[3:]).strip()
     await _reply_cli(event, ["manage", "push-group-dm-msg", "--source-guild-id", source_guild_id, "--peer-tiny-id", peer_tiny_id, "--text", text, "--json"], title="发送频道私信", guild_id=source_guild_id)
 
-@handler(r"^频道退出\s+\S+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道退出\s+\S+$", ignore_at_check=True)
 async def handle_leave_guild(event, match):
     guild_id = _parts(event)[1]
     await _reply_cli(event, ["manage", "leave-guild", "--guild-id", guild_id, "--yes", "--json"], title="退出频道", guild_id=guild_id)
 
-@handler(r"^互动消息(?:\s+\S+)?(?:\s+\S+)?$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^互动消息(?:\s+\S+)?(?:\s+\S+)?$", ignore_at_check=True)
 async def handle_notices(event, match):
     parts = _parts(event)
     # 支持翻页令牌（n 开头）
@@ -660,7 +715,7 @@ async def handle_notices(event, match):
     args += ["--json"]
     await _reply_cli(event, args, title="互动消息", guild_id=parts[1] if len(parts) >= 2 else None)
 
-@handler(r"^频道帖子\s+\S+(?:\s+\S+)?$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道帖子\s+\S+(?:\s+\S+)?$", ignore_at_check=True)
 async def handle_feed_list(event, match):
     parts = _parts(event)
     guild_id = parts[1]
@@ -677,7 +732,7 @@ async def handle_feed_list(event, match):
     args += ["--json"]
     await _reply_cli(event, args, title="频道帖子", guild_id=guild_id)
 
-@handler(r"^频道搜帖\s+\S+\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道搜帖\s+\S+\s+.+$", ignore_at_check=True)
 async def handle_search_feeds(event, match):
     parts = _parts(event)
     guild_id = parts[1]
@@ -699,7 +754,7 @@ async def handle_search_feeds(event, match):
     await _reply_cli(event, ["feed", "search-guild-feeds", "--guild-id", guild_id, "--keyword", keyword, "--json"], title="频道搜帖", guild_id=guild_id)
 
 
-@handler(r"^帖子详情\s+\S+(?:\s+\S+)?$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^帖子详情\s+\S+(?:\s+\S+)?$", ignore_at_check=True)
 async def handle_feed_detail(event, match):
     parts = _parts(event)
     feed_id = parts[1]
@@ -709,7 +764,7 @@ async def handle_feed_detail(event, match):
         args[2:2] = ["--guild-id", guild_id]
     await _reply_cli(event, args, title="帖子详情", guild_id=guild_id)
 
-@handler(r"^帖子评论\s+\S+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^帖子评论\s+\S+$", ignore_at_check=True)
 async def handle_feed_comments(event, match):
     parts = _parts(event)
     if len(parts) < 2:
@@ -736,7 +791,7 @@ async def handle_feed_comments(event, match):
     args += ["--json"]
     await _reply_cli(event, args, title="帖子评论", guild_id=guild_id)
 
-@handler(r"^帖子回复\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^帖子回复\s+.+$", ignore_at_check=True)
 async def handle_reply_list(event, match):
     """帖子回复统一入口：回复令牌回复评论 / 翻页令牌看更多回复 / 显式参数查回复列表。"""
     parts = _parts(event)
@@ -781,7 +836,7 @@ async def handle_reply_list(event, match):
     args += ["--json"]
     await _reply_cli(event, args, title="评论回复", guild_id=guild_id)
 
-@handler(r"^帖子评论\s+\S+\s+\S+(?:\s+\S+)?(?:\s+.+)?$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^帖子评论\s+\S+\s+\S+(?:\s+\S+)?(?:\s+.+)?$", ignore_at_check=True)
 async def handle_publish_comment(event, match):
     parts = _parts(event)
     if len(parts) < 4:
@@ -805,7 +860,7 @@ async def handle_publish_comment(event, match):
         args[2:2] = ["--guild-id", guild_id, "--channel-id", channel_id]
     await _reply_cli(event, args, title="发表评论", guild_id=guild_id)
 
-@handler(r"^帖子分享链接\s+\S+(?:\s+\S+)?$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^帖子分享链接\s+\S+(?:\s+\S+)?$", ignore_at_check=True)
 async def handle_feed_share(event, match):
     parts = _parts(event)
     feed_id = parts[1]
@@ -815,7 +870,7 @@ async def handle_feed_share(event, match):
         args[2:2] = ["--guild-id", guild_id]
     await _reply_cli(event, args, title="帖子分享链接", guild_id=guild_id)
 
-@handler(r"^频道发帖\s+\S+\s+\S+\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道发帖\s+\S+\s+\S+\s+.+$", ignore_at_check=True)
 async def handle_publish_feed(event, match):
     parts = _parts(event)
     guild_id = parts[1]
@@ -823,7 +878,7 @@ async def handle_publish_feed(event, match):
     content = " ".join(parts[3:]).strip()
     await _reply_cli(event, ["feed", "publish-feed", "--guild-id", guild_id, "--channel-id", channel_id, "--content", content, "--json"], title="发布帖子", guild_id=guild_id)
 
-@handler(r"^频道长帖\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道长帖\s+.+$", ignore_at_check=True)
 async def handle_publish_long_feed(event, match):
     m = re.match(r"^频道长帖\s+(\S+)\s+(\S+)\s+(.+?)\s*\|\s*(.+)$", _text(event), re.S)
     if not m:
@@ -832,7 +887,7 @@ async def handle_publish_long_feed(event, match):
     guild_id, channel_id, title, content = m.groups()
     await _reply_cli(event, ["feed", "publish-feed", "--guild-id", guild_id, "--channel-id", channel_id, "--title", title.strip(), "--content", content.strip(), "--json"], title="发布长帖", guild_id=guild_id)
 
-@handler(r"^帖子点赞\s+\S+(?:\s+\S+\s+\S+)?$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^帖子点赞\s+\S+(?:\s+\S+\s+\S+)?$", ignore_at_check=True)
 async def handle_feed_like(event, match):
     parts = _parts(event)
     feed_id = parts[1]
@@ -843,7 +898,7 @@ async def handle_feed_like(event, match):
         args[2:2] = ["--guild-id", guild_id, "--channel-id", channel_id]
     await _reply_cli(event, args, title="帖子点赞", guild_id=guild_id)
 
-@handler(r"^帖子取消点赞\s+\S+(?:\s+\S+\s+\S+)?$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^帖子取消点赞\s+\S+(?:\s+\S+\s+\S+)?$", ignore_at_check=True)
 async def handle_feed_unlike(event, match):
     parts = _parts(event)
     feed_id = parts[1]
@@ -854,7 +909,7 @@ async def handle_feed_unlike(event, match):
         args[2:2] = ["--guild-id", guild_id, "--channel-id", channel_id]
     await _reply_cli(event, args, title="帖子取消点赞", guild_id=guild_id)
 
-@handler(r"^帖子评论回复\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^帖子评论回复\s+.+$", ignore_at_check=True)
 async def handle_reply_comment(event, match):
     parts = _parts(event)
     if len(parts) >= 3 and re.fullmatch(r"r[0-9a-f]+", parts[1]):
@@ -908,7 +963,7 @@ async def handle_reply_comment(event, match):
     ], title="回复评论")
 
 
-@handler(r"^删除评论\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^删除评论\s+.+$", ignore_at_check=True)
 async def handle_delete_comment(event, match):
     parts = _parts(event)
     if len(parts) >= 2 and re.fullmatch(r"d[0-9a-f]+", parts[1]):
@@ -950,7 +1005,7 @@ async def handle_delete_comment(event, match):
         args[2:2] = ["--guild-id", guild_id, "--channel-id", channel_id]
     await _reply_cli(event, args, title="删除评论", guild_id=guild_id)
 
-@handler(r"^删除回复\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^删除回复\s+.+$", ignore_at_check=True)
 async def handle_delete_reply(event, match):
     parts = _parts(event)
     if len(parts) >= 2 and re.fullmatch(r"d[0-9a-f]+", parts[1]):
@@ -1001,56 +1056,56 @@ async def handle_delete_reply(event, match):
         args[2:2] = ["--guild-id", guild_id, "--channel-id", channel_id]
     await _reply_cli(event, args, title="删除回复", guild_id=guild_id)
 
-@handler(r"^回复点赞\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^回复点赞\s+.+$", ignore_at_check=True)
 async def handle_like_reply(event, match):
     await _handle_reply_like(event, like_type="5", title="回复点赞")
 
-@handler(r"^回复取消点赞\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^回复取消点赞\s+.+$", ignore_at_check=True)
 async def handle_unlike_reply(event, match):
     await _handle_reply_like(event, like_type="6", title="回复取消点赞")
 
-@handler(r"^评论点赞\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^评论点赞\s+.+$", ignore_at_check=True)
 async def handle_like_comment(event, match):
     await _handle_comment_like(event, like_type="3", title="评论点赞")
 
-@handler(r"^评论取消点赞\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^评论取消点赞\s+.+$", ignore_at_check=True)
 async def handle_unlike_comment(event, match):
     await _handle_comment_like(event, like_type="4", title="评论取消点赞")
 
-@handler(r"^帖子设精华\s+\S+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^帖子设精华\s+\S+$", ignore_at_check=True)
 async def handle_feed_essence_on(event, match):
     feed_id = _parts(event)[1]
     await _reply_cli(event, ["feed", "set-feed-essence", "--feed-id", feed_id, "--action", "1", "--json"], title="帖子设精华")
 
-@handler(r"^帖子取消精华\s+\S+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^帖子取消精华\s+\S+$", ignore_at_check=True)
 async def handle_feed_essence_off(event, match):
     feed_id = _parts(event)[1]
     await _reply_cli(event, ["feed", "set-feed-essence", "--feed-id", feed_id, "--action", "2", "--json"], title="帖子取消精华")
 
-@handler(r"^帖子推送精华\s+\S+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^帖子推送精华\s+\S+$", ignore_at_check=True)
 async def handle_feed_push_essence(event, match):
     feed_id = _parts(event)[1]
     await _reply_cli(event, ["feed", "push-essence-feed", "--feed-id", feed_id, "--json"], title="帖子推送精华")
 
-@handler(r"^帖子删除\s+\S+\s+\S+\s+\S+\s+\S+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^帖子删除\s+\S+\s+\S+\s+\S+\s+\S+$", ignore_at_check=True)
 async def handle_delete_feed(event, match):
     parts = _parts(event)
     feed_id, guild_id, channel_id, create_time = parts[1], parts[2], parts[3], parts[4]
     await _reply_cli(event, ["feed", "del-feed", "--feed-id", feed_id, "--guild-id", guild_id, "--channel-id", channel_id, "--create-time", create_time, "--yes", "--json"], title="删除帖子", guild_id=guild_id)
 
-@handler(r"^帖子置顶\s+\S+\s+\S+\s+\S+\s+\S+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^帖子置顶\s+\S+\s+\S+\s+\S+\s+\S+$", ignore_at_check=True)
 async def handle_top_feed(event, match):
     parts = _parts(event)
     feed_id, user_id, create_time, guild_id = parts[1], parts[2], parts[3], parts[4]
     await _reply_cli(event, ["feed", "top-feed", "--feed-id", feed_id, "--user-id", user_id, "--create-time", create_time, "--guild-id", guild_id, "--action", "1", "--top-type", "1", "--json"], title="帖子置顶", guild_id=guild_id)
 
-@handler(r"^帖子取消置顶\s+\S+\s+\S+\s+\S+\s+\S+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^帖子取消置顶\s+\S+\s+\S+\s+\S+\s+\S+$", ignore_at_check=True)
 async def handle_untop_feed(event, match):
     parts = _parts(event)
     feed_id, user_id, create_time, guild_id = parts[1], parts[2], parts[3], parts[4]
     await _reply_cli(event, ["feed", "top-feed", "--feed-id", feed_id, "--user-id", user_id, "--create-time", create_time, "--guild-id", guild_id, "--action", "2", "--top-type", "1", "--json"], title="帖子取消置顶", guild_id=guild_id)
 
-@handler(r"^帖子修改\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^帖子修改\s+.+$", ignore_at_check=True)
 async def handle_alter_feed(event, match):
     m = re.match(r"^帖子修改\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(短帖|长帖|1|2)\s+(.+)$", _text(event), re.S)
     if not m:
@@ -1084,7 +1139,7 @@ async def handle_alter_feed(event, match):
         args.extend(["--content", content])
     await _reply_cli(event, args, title="修改帖子", guild_id=guild_id)
 
-@handler(r"^帖子移动\s+\S+\s+\S+\s+\S+\s+\S+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^帖子移动\s+\S+\s+\S+\s+\S+\s+\S+$", ignore_at_check=True)
 async def handle_move_feed(event, match):
     parts = _parts(event)
     feed_id, guild_id, original_channel_id, target_channel_id = parts[1], parts[2], parts[3], parts[4]
@@ -1099,7 +1154,7 @@ async def handle_move_feed(event, match):
 
 # ===================== 腾讯频道 Skill 1.1.5 同步：扫码登录 / Markdown 帖 / 通知 =====================
 
-@handler(r"^频道登录$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道登录$", ignore_at_check=True)
 async def handle_login(event, match):
     """扫码授权登录：返回授权链接和二维码路径，扫码后发「频道登录确认」领取 token。"""
     ok, output = await asyncio.to_thread(_run_cli, ["login", "--json"])
@@ -1119,32 +1174,32 @@ async def handle_login(event, match):
         return
     await event.reply(_render_result("频道登录", ok, _normalize_rate_limit(output), ["login", "--json"]))
 
-@handler(r"^频道登录确认$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道登录确认$", ignore_at_check=True)
 async def handle_login_poll(event, match):
     _invalidate_self_user_cache()
     await _reply_cli(event, ["login", "poll-token", "--json"], title="频道登录确认")
 
-@handler(r"^频道登录状态$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道登录状态$", ignore_at_check=True)
 async def handle_login_status(event, match):
     await _reply_cli(event, ["login", "status", "--json"], title="频道登录状态")
 
-@handler(r"^频道退出登录$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道退出登录$", ignore_at_check=True)
 async def handle_login_logout(event, match):
     _invalidate_self_user_cache()
     await _reply_cli(event, ["login", "logout", "--json"], title="频道退出登录")
 
-@handler(r"^频道版本$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道版本$", ignore_at_check=True)
 async def handle_cli_version(event, match):
     await _reply_cli(event, ["version"], title="CLI 版本")
 
-@handler(r"^频道MD帖\s+\S+\s+\S+\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道MD帖\s+\S+\s+\S+\s+.+$", ignore_at_check=True)
 async def handle_publish_md_feed(event, match):
     """Markdown 短帖：正文按 Markdown 渲染（--markdown-content）。"""
     parts = _text(event).split(None, 3)
     guild_id, channel_id, content = parts[1], parts[2], parts[3].strip()
     await _reply_cli(event, ["feed", "publish-feed", "--guild-id", guild_id, "--channel-id", channel_id, "--markdown-content", content, "--json"], title="发布Markdown帖", guild_id=guild_id)
 
-@handler(r"^频道MD长帖\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道MD长帖\s+.+$", ignore_at_check=True)
 async def handle_publish_md_long_feed(event, match):
     m = re.match(r"^频道MD长帖\s+(\S+)\s+(\S+)\s+(.+?)\s*\|\s*(.+)$", _text(event), re.S)
     if not m:
@@ -1153,40 +1208,40 @@ async def handle_publish_md_long_feed(event, match):
     guild_id, channel_id, title, content = m.groups()
     await _reply_cli(event, ["feed", "publish-feed", "--guild-id", guild_id, "--channel-id", channel_id, "--title", title.strip(), "--markdown-content", content.strip(), "--json"], title="发布Markdown长帖", guild_id=guild_id)
 
-@handler(r"^频道通知状态$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道通知状态$", ignore_at_check=True)
 async def handle_notices_status(event, match):
     await _reply_cli(event, ["manage", "notices-status", "--json"], title="通知状态")
 
-@handler(r"^频道检查通知$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道检查通知$", ignore_at_check=True)
 async def handle_check_notices(event, match):
     await _reply_cli(event, ["manage", "check-notices", "--json"], title="检查通知")
 
-@handler(r"^频道最近通知$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^频道最近通知$", ignore_at_check=True)
 async def handle_recent_notices(event, match):
     await _reply_cli(event, ["manage", "get-recent-notices", "--json"], title="最近通知")
 
-@handler(r"^评论通知\s+\d+\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^评论通知\s+\d+\s+.+$", ignore_at_check=True)
 async def handle_comment_by_ref(event, match):
     """按通知编号评论帖子本身（do-comment --ref）。"""
     parts = _text(event).split(None, 2)
     ref, content = parts[1], parts[2].strip()
     await _reply_cli(event, ["feed", "do-comment", "--ref", ref, "--content", content, "--json"], title="评论通知帖子")
 
-@handler(r"^回复通知\s+\d+\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^回复通知\s+\d+\s+.+$", ignore_at_check=True)
 async def handle_reply_by_ref(event, match):
     """按通知编号回复对方的评论（do-reply --ref）。"""
     parts = _text(event).split(None, 2)
     ref, content = parts[1], parts[2].strip()
     await _reply_cli(event, ["feed", "do-reply", "--ref", ref, "--content", content, "--json"], title="回复通知评论")
 
-@handler(r"^处理通知\s+\d+\s+(同意|拒绝)$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^处理通知\s+\d+\s+(同意|拒绝)$", ignore_at_check=True)
 async def handle_deal_notice(event, match):
     parts = _parts(event)
     ref, action = parts[1], parts[2]
     action_id = "agree" if action == "同意" else "refuse"
     await _reply_cli(event, ["manage", "deal-notice", "--ref", ref, "--action-id", action_id, "--json"], title=f"处理通知（{action}）")
 
-@handler(r"^私信通知回复\s+\d+\s+.+$", owner_only=True, ignore_at_check=True)
+@admin_handler(r"^私信通知回复\s+\d+\s+.+$", ignore_at_check=True)
 async def handle_dm_reply_by_ref(event, match):
     parts = _text(event).split(None, 2)
     ref, content = parts[1], parts[2].strip()
@@ -2414,7 +2469,21 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
         items = payload.get("comments") or payload.get("items") or payload.get("list")
         feed_id = payload.get("feed_id") or payload.get("feedId")
         guild_id = payload.get("guild_id") or payload.get("guildId")
-        feed_create_time = payload.get("create_time_raw") or payload.get("feed_create_time") or payload.get("create_time")
+        feed_create_time = payload.get("create_time_raw") or payload.get("feed_create_time") or payload.get("create_time") or payload.get("createTime")
+        feed_author_id_global = payload.get("feed_author_id") or payload.get("author_id") or payload.get("authorId") or payload.get("feedAuthorId")
+        # 帖子级字段缺失时补查一次帖子详情，保证每条评论都能生成「回复」按钮
+        if feed_id and (not feed_create_time or not feed_author_id_global):
+            detail_args = ["feed", "get-feed-detail", "--feed-id", str(feed_id), "--json"]
+            if guild_id:
+                detail_args[2:2] = ["--guild-id", str(guild_id)]
+            ok_detail, output_detail = _run_cli(detail_args)
+            if ok_detail:
+                detail_data = _extract_json(output_detail)
+                detail_payload = detail_data.get("data") if isinstance(detail_data, dict) and isinstance(detail_data.get("data"), dict) else {}
+                feed_obj = detail_payload.get("feed") if isinstance(detail_payload.get("feed"), dict) else detail_payload
+                if isinstance(feed_obj, dict):
+                    feed_create_time = feed_create_time or feed_obj.get("create_time_raw") or feed_obj.get("feed_create_time") or feed_obj.get("create_time") or feed_obj.get("createTime")
+                    feed_author_id_global = feed_author_id_global or feed_obj.get("author_id") or feed_obj.get("authorId") or feed_obj.get("feed_author_id")
         if feed_id and feed_create_time:
             lines.append(_quick_cmd(f"帖子评论 {feed_id} {feed_create_time} 内容", "发表评论"))
         if isinstance(items, list):
@@ -2437,19 +2506,20 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
                 if len(display_content) > 60:
                     display_content = display_content[:60] + "..."
                 feed_id = payload.get("feed_id") or payload.get("feedId") or item.get("feed_id") or item.get("feedId")
-                feed_author_id = payload.get("author_id") or payload.get("feed_author_id") or item.get("feed_author_id")
-                feed_create_time = payload.get("create_time_raw") or payload.get("feed_create_time") or item.get("feed_create_time")
-                comment_author_id = item.get("author_id") or item.get("comment_author_id")
+                feed_author_id = feed_author_id_global or item.get("feed_author_id")
+                item_feed_create_time = feed_create_time or item.get("feed_create_time")
+                comment_author_id = item.get("author_id") or item.get("comment_author_id") or item.get("authorId")
+                comment_create_time = item.get("comment_create_time") or item.get("create_time_raw") or item.get("create_time") or item.get("createTime")
                 guild_id = item.get("guild_id") or item.get("guildId") or payload.get("guild_id") or payload.get("guildId")
                 channel_id = item.get("channel_id") or item.get("channelId") or payload.get("channel_id") or payload.get("channelId")
                 attach_info = item.get("attach_info") or item.get("attachInfo")
                 ops = []
-                if feed_id and cid and feed_author_id and feed_create_time and comment_author_id:
+                if feed_id and cid and feed_author_id and item_feed_create_time and comment_author_id:
                     like_token = _save_token_payload("comment_like", {
                         "feed_id": feed_id,
                         "comment_id": cid,
                         "feed_author_id": feed_author_id,
-                        "feed_create_time": feed_create_time,
+                        "feed_create_time": item_feed_create_time,
                         "comment_author_id": comment_author_id,
                         "guild_id": guild_id,
                         "channel_id": channel_id,
@@ -2458,21 +2528,21 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
                         "feed_id": feed_id,
                         "comment_id": cid,
                         "comment_author_id": comment_author_id,
-                        "feed_create_time": feed_create_time,
+                        "feed_create_time": item_feed_create_time,
                         "guild_id": guild_id,
                         "channel_id": channel_id,
                     })
                     ops.append(_quick_cmd(f"评论点赞 {like_token}", "点赞"))
                     ops.append(_quick_cmd(f"评论取消点赞 {like_token}", "取消点赞"))
                     ops.append(_quick_cmd(f"删除评论 {delete_token}", "删除"))
-                if feed_id and cid and feed_author_id and feed_create_time and comment_author_id and item.get("comment_create_time"):
+                if feed_id and cid and feed_author_id and item_feed_create_time and comment_author_id and comment_create_time:
                     reply_token = _save_token_payload("reply_comment", {
                         "feed_id": feed_id,
                         "comment_id": cid,
                         "feed_author_id": feed_author_id,
-                        "feed_create_time": feed_create_time,
+                        "feed_create_time": item_feed_create_time,
                         "comment_author_id": comment_author_id,
-                        "comment_create_time": item.get("comment_create_time"),
+                        "comment_create_time": comment_create_time,
                         "guild_id": guild_id,
                     })
                     ops.append(_quick_cmd(f"帖子评论回复 {reply_token} ", "回复"))
@@ -2858,6 +2928,8 @@ def _help_text() -> str:
         "- 说明 2：开启预演后只校验参数，不会真正执行写操作。",
         "- 说明 3：开启调试后会额外附上原始返回内容，方便排查。",
         "- 说明 4：长帖命令请用 `标题 | 正文` 的格式，中间保留竖线。",
+        "- 说明 5：本插件仅限管理员使用（插件目录 admins.txt，一行一个，可在 Web 后台「腾讯频道」页面维护）。",
+        "- 说明 6：Web 后台「腾讯频道」页面支持界面化管理频道 / 帖子 / 评论，以及定时发帖（5 段 Cron）。",
     ]
     return "\n".join(lines)
 
