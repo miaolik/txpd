@@ -501,18 +501,37 @@ async function showFeedDetail(fid, gid) {
   el.innerHTML = '<div class="muted">加载中...</div>';
   renderJson(el, await cli('feed-detail', { feed_id: fid, guild_id: gid }));
 }
+// 帖子列表接口不返回 channel_id/create_time，缺失时用帖子详情补全
+async function fillFeedParams(fid, gid, cid, ct) {
+  if (cid && ct) return { cid, ct };
+  const r = await cli('feed-detail', { feed_id: fid, guild_id: gid });
+  const p = payloadOf(r);
+  const f = (p && typeof p.feed === 'object' && p.feed) || p || {};
+  return {
+    cid: cid || pick(f, ['channel_id', 'channelId']),
+    ct: ct || pick(f, ['create_time_raw', 'create_time', 'createTime']),
+  };
+}
 async function likeFeed(fid, gid, cid, action) {
-  const r = await cli('like-feed', { feed_id: fid, guild_id: gid, channel_id: cid, action });
+  const filled = await fillFeedParams(fid, gid, cid, 'x');
+  const r = await cli('like-feed', { feed_id: fid, guild_id: gid, channel_id: filled.cid, action });
   toast(r.success ? '操作成功' : (r.message || '失败'), r.success);
 }
 async function deleteFeed(fid, gid, cid, ct) {
   if (!await uiConfirm(`确认删除帖子 ${fid}？此操作不可逆！`)) return;
-  const r = await cli('del-feed', { feed_id: fid, guild_id: gid, channel_id: cid, create_time: ct });
+  toast('删除中...', true);
+  const filled = await fillFeedParams(fid, gid, cid, ct);
+  const r = await cli('del-feed', { feed_id: fid, guild_id: gid, channel_id: filled.cid, create_time: filled.ct });
   toast(r.success ? '已删除' : (r.message || '失败'), r.success);
+  if (r.success) loadFeeds();
 }
 
 let commentCtx = {};
 async function showComments(fid, gid, cid, aid, ct) {
+  if (!cid || !ct) {
+    const filled = await fillFeedParams(fid, gid, cid, ct);
+    cid = filled.cid; ct = filled.ct;
+  }
   commentCtx = { feed_id: fid, guild_id: gid, channel_id: cid, feed_author_id: aid, feed_create_time: ct };
   const card = document.getElementById('comments-card');
   reveal(card);
