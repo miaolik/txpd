@@ -29,6 +29,11 @@
   .muted { color:var(--muted); font-size:12px; }
   .json { background:#f0f2f8; border-radius:8px; padding:10px; font-size:12px; white-space:pre-wrap; word-break:break-all; max-height:420px; overflow:auto; margin-top:8px; font-family:Consolas,Menlo,monospace; }
   .toast { position:fixed; top:16px; right:16px; padding:10px 16px; border-radius:8px; color:#fff; z-index:99; display:none; max-width:60%; }
+  .modal-mask { position:fixed; inset:0; background:rgba(15,20,30,.45); z-index:98; display:none; align-items:center; justify-content:center; }
+  .modal-box { background:#fff; border-radius:12px; padding:18px; width:min(420px, 90vw); box-shadow:0 12px 40px rgba(0,0,0,.25); }
+  .modal-box p { margin:0 0 12px; word-break:break-all; line-height:1.6; }
+  .modal-box input { width:100%; box-sizing:border-box; margin-bottom:12px; }
+  .modal-btns { display:flex; gap:8px; justify-content:flex-end; }
   .badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:12px; }
   .badge.on { background:#e2f7e6; color:var(--ok); }
   .badge.off { background:#f2f3f7; color:var(--muted); }
@@ -40,6 +45,16 @@
 </head>
 <body>
 <div class="toast" id="toast"></div>
+<div class="modal-mask" id="modal-mask">
+  <div class="modal-box">
+    <p id="modal-msg"></p>
+    <input id="modal-input" class="hidden">
+    <div class="modal-btns">
+      <button class="btn gray" id="modal-cancel">取消</button>
+      <button class="btn" id="modal-ok">确定</button>
+    </div>
+  </div>
+</div>
 <h2>腾讯频道管理</h2>
 <div class="tabs">
   <button data-tab="guilds" class="active">频道管理</button>
@@ -209,6 +224,33 @@ async function api(path, body, method) {
 }
 const cli = (action, params) => api('cli', { action, params: params || {} });
 
+// 页内弹窗（代替原生 confirm/prompt，避免 iframe 里原生对话框被浏览器拦截导致按钮无反应）
+function _modal(msg, withInput, defVal) {
+  return new Promise(resolve => {
+    const mask = document.getElementById('modal-mask');
+    const input = document.getElementById('modal-input');
+    document.getElementById('modal-msg').textContent = msg;
+    input.classList.toggle('hidden', !withInput);
+    input.value = defVal || '';
+    mask.style.display = 'flex';
+    const done = v => { mask.style.display = 'none'; ok.onclick = cancel.onclick = input.onkeydown = null; resolve(v); };
+    const ok = document.getElementById('modal-ok');
+    const cancel = document.getElementById('modal-cancel');
+    ok.onclick = () => done(withInput ? input.value : true);
+    cancel.onclick = () => done(withInput ? null : false);
+    input.onkeydown = e => { if (e.key === 'Enter') ok.onclick(); };
+    if (withInput) input.focus();
+  });
+}
+const uiConfirm = msg => _modal(msg, false);
+const uiPrompt = (msg, defVal) => _modal(msg, true, defVal);
+
+// 展示卡片并滚动到可视区域（避免卡片在页面底部展开时看不到、误以为没反应）
+function reveal(card) {
+  card.classList.remove('hidden');
+  setTimeout(() => card.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
+}
+
 function payloadOf(r) {
   let d = r && r.data;
   if (d && typeof d === 'object' && d.data && typeof d.data === 'object') d = d.data;
@@ -260,7 +302,7 @@ async function loadGuilds() {
 async function showGuildInfo(gid) {
   currentGuild = gid;
   const card = document.getElementById('guild-detail-card');
-  card.classList.remove('hidden');
+  reveal(card);
   document.getElementById('guild-detail-title').textContent = `频道资料：${gid}`;
   const el = document.getElementById('guild-detail');
   el.innerHTML = '<div class="muted">加载中...</div>';
@@ -286,7 +328,7 @@ async function reprofileGuild(gid) {
 async function showChannels(gid) {
   currentGuild = gid;
   const card = document.getElementById('channels-card');
-  card.classList.remove('hidden');
+  reveal(card);
   const el = document.getElementById('channel-list');
   el.innerHTML = '<div class="muted">加载中...</div>';
   const r = await cli('channels', { guild_id: gid });
@@ -313,14 +355,14 @@ async function createChannel() {
   if (r.success) showChannels(currentGuild);
 }
 async function modifyChannel(gid, cid) {
-  const name = prompt('新版块名称：');
+  const name = await uiPrompt('新版块名称：');
   if (!name) return;
   const r = await cli('modify-channel', { guild_id: gid, channel_id: cid, channel_name: name.trim() });
   toast(r.success ? '修改成功' : (r.message || '失败'), r.success);
   if (r.success) showChannels(gid);
 }
 async function deleteChannel(gid, cid, name) {
-  if (!confirm(`确认删除版块「${name}」？此操作不可逆！`)) return;
+  if (!await uiConfirm(`确认删除版块「${name}」？此操作不可逆！`)) return;
   const r = await cli('delete-channel', { guild_id: gid, channel_ids: cid });
   toast(r.success ? '删除成功' : (r.message || '失败'), r.success);
   if (r.success) showChannels(gid);
@@ -329,7 +371,7 @@ async function deleteChannel(gid, cid, name) {
 async function showMembers(gid) {
   currentGuild = gid;
   const card = document.getElementById('members-card');
-  card.classList.remove('hidden');
+  reveal(card);
   document.getElementById('members-guild').textContent = `频道：${gid}`;
   const el = document.getElementById('member-list');
   el.innerHTML = '<div class="muted">加载中...</div>';
@@ -352,12 +394,12 @@ async function showMembers(gid) {
   el.innerHTML = html + '</table>';
 }
 async function memberAction(action, gid, tid, label) {
-  if (!confirm(`确认${label}（${tid}）？`)) return;
+  if (!await uiConfirm(`确认${label}（${tid}）？`)) return;
   const r = await cli(action, { guild_id: gid, tiny_ids: tid });
   toast(r.success ? `${label}成功` : (r.message || '失败'), r.success);
 }
 async function muteMember(gid, tid) {
-  const seconds = prompt('禁言时长（秒），例如 3600：', '3600');
+  const seconds = await uiPrompt('禁言时长（秒），例如 3600：', '3600');
   if (!seconds) return;
   const r = await cli('mute', { guild_id: gid, tiny_id: tid, time_stamp: seconds.trim() });
   toast(r.success ? '已禁言' : (r.message || '失败'), r.success);
@@ -367,7 +409,7 @@ async function unmuteMember(gid, tid) {
   toast(r.success ? '已解除禁言' : (r.message || '失败'), r.success);
 }
 async function kickMember(gid, tid, nick) {
-  if (!confirm(`确认将「${nick}」(${tid}) 踢出频道？`)) return;
+  if (!await uiConfirm(`确认将「${nick}」(${tid}) 踢出频道？`)) return;
   const r = await cli('kick', { guild_id: gid, tiny_id: tid });
   toast(r.success ? '已踢出' : (r.message || '失败'), r.success);
 }
@@ -380,7 +422,7 @@ async function joinGuild() {
   if (r.success) loadGuilds();
 }
 async function leaveGuild(gid, name) {
-  if (!confirm(`确认退出频道「${name}」(${gid})？`)) return;
+  if (!await uiConfirm(`确认退出频道「${name}」(${gid})？`)) return;
   const r = await cli('leave-guild', { guild_id: gid });
   toast(r.success ? '已退出' : (r.message || '失败'), r.success);
   if (r.success) loadGuilds();
@@ -394,7 +436,7 @@ async function searchGuild() {
 }
 async function showJoinSetting(gid) {
   const card = document.getElementById('guild-detail-card');
-  card.classList.remove('hidden');
+  reveal(card);
   document.getElementById('guild-detail-title').textContent = `加入方式：${gid}`;
   const el = document.getElementById('guild-detail');
   el.innerHTML = '<div class="muted">加载中...</div>';
@@ -453,7 +495,7 @@ async function searchFeeds() {
 }
 async function showFeedDetail(fid, gid) {
   const card = document.getElementById('comments-card');
-  card.classList.remove('hidden');
+  reveal(card);
   document.getElementById('comments-feed').textContent = `帖子详情：${fid}`;
   const el = document.getElementById('comment-list');
   el.innerHTML = '<div class="muted">加载中...</div>';
@@ -464,7 +506,7 @@ async function likeFeed(fid, gid, cid, action) {
   toast(r.success ? '操作成功' : (r.message || '失败'), r.success);
 }
 async function deleteFeed(fid, gid, cid, ct) {
-  if (!confirm(`确认删除帖子 ${fid}？此操作不可逆！`)) return;
+  if (!await uiConfirm(`确认删除帖子 ${fid}？此操作不可逆！`)) return;
   const r = await cli('del-feed', { feed_id: fid, guild_id: gid, channel_id: cid, create_time: ct });
   toast(r.success ? '已删除' : (r.message || '失败'), r.success);
 }
@@ -473,7 +515,7 @@ let commentCtx = {};
 async function showComments(fid, gid, cid, aid, ct) {
   commentCtx = { feed_id: fid, guild_id: gid, channel_id: cid, feed_author_id: aid, feed_create_time: ct };
   const card = document.getElementById('comments-card');
-  card.classList.remove('hidden');
+  reveal(card);
   document.getElementById('comments-feed').textContent = `帖子：${fid}`;
   const el = document.getElementById('comment-list');
   el.innerHTML = '<div class="muted">加载中...</div>';
@@ -513,7 +555,7 @@ async function doComment() {
   if (r.success) showComments(commentCtx.feed_id, commentCtx.guild_id, commentCtx.channel_id, commentCtx.feed_author_id, commentCtx.feed_create_time);
 }
 async function replyComment(ccid, cAid, cCt) {
-  const content = prompt('回复内容：');
+  const content = await uiPrompt('回复内容：');
   if (!content) return;
   const r = await cli('do-reply', {
     feed_id: commentCtx.feed_id, comment_id: ccid,
@@ -532,7 +574,7 @@ async function likeComment(ccid, cAid, likeType) {
   toast(r.success ? '操作成功' : (r.message || '失败'), r.success);
 }
 async function deleteComment(ccid, cAid) {
-  if (!confirm('确认删除该评论？此操作不可逆！')) return;
+  if (!await uiConfirm('确认删除该评论？此操作不可逆！')) return;
   const r = await cli('del-comment', {
     feed_id: commentCtx.feed_id, comment_id: ccid, comment_author_id: cAid,
     feed_create_time: commentCtx.feed_create_time, guild_id: commentCtx.guild_id, channel_id: commentCtx.channel_id,
@@ -627,14 +669,14 @@ async function toggleSchedule(id) {
   loadSchedules();
 }
 async function runSchedule(id) {
-  if (!confirm('确认立即执行该计划（会真实发帖）？')) return;
+  if (!await uiConfirm('确认立即执行该计划（会真实发帖）？')) return;
   toast('执行中...', true);
   const r = await api('schedules/run', { id });
   toast(r.message || (r.success ? '执行成功' : '执行失败'), r.success);
   loadSchedules();
 }
 async function deleteSchedule(id, name) {
-  if (!confirm(`确认删除计划「${name}」？`)) return;
+  if (!await uiConfirm(`确认删除计划「${name}」？`)) return;
   const r = await api('schedules/delete', { id });
   toast(r.message || '已删除', r.success);
   loadSchedules();
