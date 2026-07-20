@@ -185,6 +185,9 @@ def _comment_content(item: Dict[str, Any]) -> str:
         rich = item.get("content_richtext") or item.get("contentRichtext") or item.get("rich_text")
         if isinstance(rich, dict):
             content = _text_of(rich.get("text"))
+    raw = item.get("content")
+    if isinstance(raw, dict) and isinstance(raw.get("images"), list) and raw["images"]:
+        content = (content + " " if content else "") + "[图片]"
     return content or "-"
 
 
@@ -194,9 +197,12 @@ _AUTHOR_ID_KEYS = ("author_id", "poster_id", "comment_author_id", "reply_author_
 
 def _item_nick(item: Dict[str, Any]) -> str:
     for key in _NICK_KEYS:
-        value = str(item.get(key) or "").strip()
-        if value:
-            return value
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    author = item.get("author")
+    if isinstance(author, str) and author.strip():
+        return author.strip()
     for sub_key in ("poster", "author", "user", "user_info", "poster_info"):
         sub = item.get(sub_key)
         if isinstance(sub, dict):
@@ -277,7 +283,7 @@ def _iter_targets(ctx: Dict[str, Any]):
         if not (cid and comment_author and comment_ts):
             continue
         yield _create_time(comment), {**base, "nick": _item_nick(comment), "content": _comment_content(comment)}
-        replies = comment.get("replies") or comment.get("reply_list") or comment.get("replyList")
+        replies = comment.get("replies") or comment.get("replies_preview") or comment.get("reply_list") or comment.get("replyList")
         if not isinstance(replies, list):
             continue
         for reply in replies:
@@ -321,6 +327,16 @@ def _target_from_item(item: Dict[str, Any], ctx: Dict[str, Any]) -> Optional[Dic
         candidates = [t for _, t in _iter_targets(ctx) if t.get("comment_id") == comment_id and not t.get("target_reply_id")]
         if candidates:
             return candidates[-1]
+    # 真实 get-notices 没有 comment_id/reply_id，按通知摘要里冒号后的正文匹配
+    summary = _notice_text(item)
+    for sep in (":", "："):
+        if sep in summary:
+            summary = summary.split(sep, 1)[1].strip()
+            break
+    if summary:
+        matched = [(ts, t) for ts, t in _iter_targets(ctx) if t.get("content", "").strip() == summary]
+        if matched:
+            return max(matched, key=lambda x: x[0])[1]
     return _newest_target(ctx)
 
 
@@ -394,7 +410,7 @@ def render_comments_image(ctx: Dict[str, Any]) -> Optional[bytes]:
         rows.append((f"● {nick}", font, "#2b5aa0"))
         for line in _wrap_text(_comment_content(comment), 52):
             rows.append((f"   {line}", font, "#1a1a1a"))
-        replies = comment.get("replies") or comment.get("reply_list") or comment.get("replyList")
+        replies = comment.get("replies") or comment.get("replies_preview") or comment.get("reply_list") or comment.get("replyList")
         if isinstance(replies, list):
             for reply in replies:
                 if not isinstance(reply, dict):
@@ -423,7 +439,7 @@ def _comments_as_text(ctx: Dict[str, Any]) -> str:
     for comment in ctx["comments"][:20]:
         nick = _item_nick(comment) or "未知用户"
         lines.append(f"● {nick}：{_comment_content(comment)[:NOTIFY_TEXT_LIMIT]}")
-        replies = comment.get("replies") or comment.get("reply_list") or comment.get("replyList")
+        replies = comment.get("replies") or comment.get("replies_preview") or comment.get("reply_list") or comment.get("replyList")
         if isinstance(replies, list):
             for reply in replies[:5]:
                 if not isinstance(reply, dict):
@@ -467,7 +483,7 @@ def _fill_missing_nicks(ctx: Dict[str, Any], user: str, limit: int = 10) -> None
     done = 0
     for comment in ctx["comments"]:
         entries = [comment]
-        replies = comment.get("replies") or comment.get("reply_list") or comment.get("replyList")
+        replies = comment.get("replies") or comment.get("replies_preview") or comment.get("reply_list") or comment.get("replyList")
         if isinstance(replies, list):
             entries += [r for r in replies if isinstance(r, dict)]
         for entry in entries:
