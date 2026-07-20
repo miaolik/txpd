@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+import ctypes
 import functools
 import json
 import os
@@ -106,7 +107,8 @@ def _resolve_cli() -> Optional[str]:
 PLUGIN_SETTINGS = BASE_DIR / "plugin_settings.json"
 TOKEN_STORE = BASE_DIR / "token_store.json"
 # Windows（凭据管理器）/ macOS（钥匙串）的 CLI 登录态是系统级全局存储，不随
-# HOME 隔离；多账号槽位需要在切换使用时把该槽位的 token 重新写回钥匙串。
+# HOME 隔离；登录后把凭证落到槽位自己的 .qqcli/.env 并保持钥匙串为空，
+# CLI 找不到钥匙串凭据时会回退读取 HOME/.qqcli/.env，从而实现按槽位隔离。
 KEYCHAIN_GLOBAL = IS_WINDOWS or sys.platform == "darwin"
 KEYCHAIN_OWNER_FILE = BASE_DIR / "keychain_owner.json"
 _KEYCHAIN_LOCK = threading.Lock()
@@ -193,9 +195,9 @@ def remove_user(name: Any) -> Tuple[bool, str]:
         data["current"] = data["users"][0] if data["users"] else ""
     _save_users(data)
     if KEYCHAIN_GLOBAL and _read_keychain_owner() == user:
-        # 被删槽位正占用全局钥匙串，退出登录防止其他槽位误用它的 token
+        # 被删槽位的登录态还留在全局钥匙串里，清掉防止其他槽位误用
         with _KEYCHAIN_LOCK:
-            _run_cli_raw(["login", "logout", "--json"], user=user)
+            _keychain_clear()
             _write_keychain_owner("")
     try:
         shutil.rmtree(_user_home(user), ignore_errors=True)
@@ -1986,94 +1988,221 @@ def _write_keychain_owner(owner: str) -> None:
     _write_json_file(KEYCHAIN_OWNER_FILE, {"owner": str(owner or "")})
 
 
+ENV_TOKEN_KEY = "QQ_AI_CONNECT_TOKEN"
+ENV_DEVICE_KEY = "QQ_AI_CONNECT_DEVICE_ID"
+_KEYCHAIN_HINTS = ("qqcli", "qq-cli", "qq_ai_connect", "tencent-channel")
+
+
+def _slot_env_file(user: str) -> Path:
+    return _user_home(user) / ".qqcli" / ".env"
+
+
+def _read_env_file(path: Path) -> Dict[str, str]:
+    entries: Dict[str, str] = {}
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            entries[key.strip()] = value.strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return entries
+
+
+def _write_slot_env(user: str, updates: Dict[str, str]) -> None:
+    """合并写入槽位自己的 .qqcli/.env（值为空表示删除该键）。"""
+    path = _slot_env_file(user)
+    entries = _read_env_file(path)
+    for key, value in updates.items():
+        if value:
+            entries[key] = value
+        else:
+            entries.pop(key, None)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(f"{k}={v}\n" for k, v in entries.items()), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _get_slot_token(user: str) -> str:
-    store = _load_token_store(user)
-    return str(store.get("__login_token__") or "").strip()
+    return _read_env_file(_slot_env_file(user)).get(ENV_TOKEN_KEY, "")
 
 
-def _set_slot_token(user: str, token: str) -> None:
-    store = _load_token_store(user)
-    store["__login_token__"] = str(token or "")
-    _save_token_store(store, user)
+def _wincred_list() -> List[Tuple[str, int, str]]:
+    """枚举 Windows 凭据管理器里 CLI 相关的凭据：(target, type, secret)。"""
+    if not IS_WINDOWS:
+        return []
+    try:
+        from ctypes import wintypes
+
+        class _CREDENTIAL(ctypes.Structure):
+            _fields_ = [
+                ("Flags", wintypes.DWORD),
+                ("Type", wintypes.DWORD),
+                ("TargetName", wintypes.LPWSTR),
+                ("Comment", wintypes.LPWSTR),
+                ("LastWritten", wintypes.FILETIME),
+                ("CredentialBlobSize", wintypes.DWORD),
+                ("CredentialBlob", ctypes.POINTER(ctypes.c_byte)),
+                ("Persist", wintypes.DWORD),
+                ("AttributeCount", wintypes.DWORD),
+                ("Attributes", ctypes.c_void_p),
+                ("TargetAlias", wintypes.LPWSTR),
+                ("UserName", wintypes.LPWSTR),
+            ]
+
+        advapi = ctypes.windll.advapi32
+        count = wintypes.DWORD()
+        pcreds = ctypes.POINTER(ctypes.POINTER(_CREDENTIAL))()
+        if not advapi.CredEnumerateW(None, 0, ctypes.byref(count), ctypes.byref(pcreds)):
+            return []
+        results: List[Tuple[str, int, str]] = []
+        try:
+            for i in range(count.value):
+                cred = pcreds[i].contents
+                target = str(cred.TargetName or "")
+                if not any(h in target.lower() for h in _KEYCHAIN_HINTS):
+                    continue
+                secret = ""
+                if cred.CredentialBlobSize:
+                    raw = ctypes.string_at(cred.CredentialBlob, cred.CredentialBlobSize)
+                    secret = raw.decode("utf-8", "ignore").strip("\x00").strip()
+                results.append((target, int(cred.Type), secret))
+        finally:
+            advapi.CredFree(pcreds)
+        return results
+    except Exception:
+        return []
 
 
-def _extract_token_from_show(output: str) -> str:
+def _wincred_delete(target: str, cred_type: int) -> None:
+    try:
+        ctypes.windll.advapi32.CredDeleteW(target, cred_type, 0)
+    except Exception:
+        pass
+
+
+_MAC_SERVICES = ("qqcli", "qq-cli", "tencent-channel-cli")
+_MAC_ACCOUNTS = ("token", "device_id")
+
+
+def _mac_keychain_read() -> Dict[str, str]:
+    creds: Dict[str, str] = {}
+    for service in _MAC_SERVICES:
+        for account in _MAC_ACCOUNTS:
+            try:
+                proc = subprocess.run(
+                    ["security", "find-generic-password", "-s", service, "-a", account, "-w"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if proc.returncode == 0 and proc.stdout.strip():
+                    creds[account] = proc.stdout.strip()
+            except Exception:
+                pass
+    return creds
+
+
+def _mac_keychain_clear() -> None:
+    for service in _MAC_SERVICES:
+        for account in _MAC_ACCOUNTS:
+            try:
+                subprocess.run(
+                    ["security", "delete-generic-password", "-s", service, "-a", account],
+                    capture_output=True, text=True, timeout=10,
+                )
+            except Exception:
+                pass
+
+
+def _keychain_read() -> Dict[str, str]:
+    """读取全局钥匙串里的 token/device_id（键：token、device_id）。"""
+    if IS_WINDOWS:
+        creds: Dict[str, str] = {}
+        for target, _cred_type, secret in _wincred_list():
+            if not secret:
+                continue
+            if "device" in target.lower():
+                creds.setdefault("device_id", secret)
+            else:
+                creds.setdefault("token", secret)
+        return creds
+    if sys.platform == "darwin":
+        return _mac_keychain_read()
+    return {}
+
+
+def _keychain_clear() -> None:
+    """清空全局钥匙串里的 CLI 凭据，避免它盖过各槽位自己的 .env。"""
+    if IS_WINDOWS:
+        for target, cred_type, _secret in _wincred_list():
+            _wincred_delete(target, cred_type)
+    elif sys.platform == "darwin":
+        _mac_keychain_clear()
+
+
+def _migrate_keychain_to_slot(slot: str) -> None:
+    """CLI 找凭证的顺序是「钥匙串 → HOME/.qqcli/.env」，而钥匙串是全局唯一
+    的，会盖住所有槽位。发现钥匙串里有 token 时，把它落到归属槽位（旧版
+    owner 标记指向的槽位，否则当前槽位）自己的 .env 后清空钥匙串，此后每个
+    槽位只用自己目录里的 .env。"""
+    creds = _keychain_read()
+    token = creds.get("token", "")
+    if not token:
+        return
+    owner = _read_keychain_owner() or slot
+    updates = {ENV_TOKEN_KEY: token}
+    if creds.get("device_id"):
+        updates[ENV_DEVICE_KEY] = creds["device_id"]
+    if not _get_slot_token(owner):
+        _write_slot_env(owner, updates)
+    _keychain_clear()
+    _write_keychain_owner("")
+
+
+def _extract_login_creds(output: str) -> Dict[str, str]:
     data = _extract_json(output)
     payload = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else {}
-    return str(payload.get("token") or payload.get("access_token") or payload.get("raw") or "").strip()
+    creds: Dict[str, str] = {}
+    if isinstance(payload, dict):
+        token = str(payload.get("token") or payload.get("access_token") or "").strip()
+        device_id = str(payload.get("device_id") or payload.get("deviceId") or "").strip()
+        if token:
+            creds["token"] = token
+        if device_id:
+            creds["device_id"] = device_id
+    return creds
 
 
-def _capture_slot_token(user: str) -> str:
-    """从钥匙串读出当前生效的 token 并存入该槽位自己的 token_store。"""
-    if "manage token show" in _UNSUPPORTED_CLI_CMDS:
-        return ""
-    ok, output = _run_cli_raw(["manage", "token", "show", "--json"], user=user)
-    if not ok:
-        if _is_unknown_command(output):
-            _UNSUPPORTED_CLI_CMDS.add("manage token show")
-        return ""
-    token = _extract_token_from_show(output)
-    if token:
-        _set_slot_token(user, token)
-    return token
-
-
-def _apply_slot_token(user: str, token: str) -> bool:
-    """把槽位保存的 token 写回钥匙串（新版 login token，旧版 token setup）。"""
-    ok, output = _run_cli_raw(["login", "token", token], user=user)
-    if not ok and _is_unknown_command(output):
-        ok, output = _run_cli_raw(["token", "setup", token], user=user)
-    return ok
-
-
-def _ensure_keychain_slot(slot: str) -> None:
-    """Windows/macOS 下钥匙串是全局存储，不随 HOME 隔离；在以另一个槽位
-    身份调用 CLI 前，先把原占用者的 token 存回其自己的目录，再把目标槽位的
-    token 写入钥匙串；目标槽位没登录过则退出登录，避免继续用上一个账号。"""
-    if not KEYCHAIN_GLOBAL or not slot:
-        return
-    owner = _read_keychain_owner()
-    if not owner:
-        # 升级迁移：首次启用时钥匙串里的登录态归属当前槽位
-        owner = get_current_user()
-        if owner:
-            _capture_slot_token(owner)
-            _write_keychain_owner(owner)
-    if owner == slot:
-        return
-    if owner:
-        _capture_slot_token(owner)
-    token = _get_slot_token(slot)
-    if token:
-        if _apply_slot_token(slot, token):
-            _write_keychain_owner(slot)
-        return
-    _run_cli_raw(["login", "logout", "--json"], user=slot)
-    _write_keychain_owner(slot)
-
-
-def _keychain_post_hook(args: List[str], ok: bool, slot: str) -> None:
-    """登录/配置/退出后同步槽位自己的 token 备份与钥匙串占用者标记。"""
+def _login_post_hook(args: List[str], ok: bool, output: str, slot: str) -> None:
+    """登录/配置/退出后把凭证落到槽位自己的 .env 并保持全局钥匙串为空。"""
     if not ok or not slot:
         return
     head = tuple(args[:2])
     if head == ("login", "poll-token"):
-        _capture_slot_token(slot)
-        _write_keychain_owner(slot)
+        creds = _extract_login_creds(output) or _keychain_read()
+        if creds.get("token"):
+            updates = {ENV_TOKEN_KEY: creds["token"]}
+            if creds.get("device_id"):
+                updates[ENV_DEVICE_KEY] = creds["device_id"]
+            _write_slot_env(slot, updates)
+        _keychain_clear()
     elif head in (("token", "setup"), ("login", "token")) and len(args) >= 3:
-        _set_slot_token(slot, str(args[2]))
-        _write_keychain_owner(slot)
+        _write_slot_env(slot, {ENV_TOKEN_KEY: str(args[2])})
+        _keychain_clear()
     elif head == ("login", "logout"):
-        _set_slot_token(slot, "")
+        _write_slot_env(slot, {ENV_TOKEN_KEY: "", ENV_DEVICE_KEY: ""})
 
 
 def _run_cli(args: List[str], stdin_text: Optional[str] = None, user: Optional[str] = None) -> Tuple[bool, str]:
     slot = _safe_user_name(user) or get_current_user()
     if KEYCHAIN_GLOBAL and slot:
         with _KEYCHAIN_LOCK:
-            _ensure_keychain_slot(slot)
+            _migrate_keychain_to_slot(slot)
             ok, output = _run_cli_raw(args, stdin_text, slot)
-            _keychain_post_hook(args, ok, slot)
+            _login_post_hook(args, ok, output, slot)
             return ok, output
     return _run_cli_raw(args, stdin_text, user)
 
