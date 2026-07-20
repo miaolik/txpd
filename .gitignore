@@ -3,3 +3,4 @@ token_store.json
 plugin_settings.json
 *.png
 feed_schedules.json
+.cli/
