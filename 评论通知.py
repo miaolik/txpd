@@ -568,9 +568,12 @@ def _seed_subscription(user: str) -> None:
     无需 CLI 的 OpenClaw 推送通道。"""
     base = _user_home(user) if user else Path.home()
     path = base / ".qqcli" / "subscription" / "state.json"
-    if path.exists():
-        return
     try:
+        if path.exists():
+            data = _read_json_file(path, {})
+            # CLI 可能自己写入 active:false（订阅未开启），必须改写为 true
+            if isinstance(data, dict) and data.get("active") is True:
+                return
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"active": True, "subscribed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}), encoding="utf-8")
     except Exception:
@@ -578,23 +581,42 @@ def _seed_subscription(user: str) -> None:
 
 
 def _is_dm_notice(item: Dict[str, Any]) -> bool:
+    source = str(item.get("source") or "").lower()
+    if source:
+        return source == "dm"
     kind = str(item.get("type") or item.get("notice_type") or item.get("noticeType") or "").lower()
-    if "dm" in kind or "private" in kind:
+    if "dm" in kind or "private" in kind or "私信" in kind:
         return True
-    return "私信" in _notice_text(item) or bool(item.get("peer_tiny_id") or item.get("peerTinyId") or item.get("from_tiny_id"))
+    return bool(item.get("peer_tiny_id") or item.get("peerTinyId") or item.get("from_tiny_id"))
 
 
 def _dm_fields(item: Dict[str, Any]) -> Dict[str, str]:
     peer = str(item.get("peer_tiny_id") or item.get("peerTinyId") or item.get("from_tiny_id") or item.get("tiny_id") or item.get("poster_tiny_id") or item.get("sender_tiny_id") or "").strip()
     guild = str(item.get("source_guild_id") or item.get("sourceGuildId") or item.get("guild_id") or item.get("guildId") or "").strip()
-    return {"peer_tiny_id": peer, "source_guild_id": guild}
+    return {"peer_tiny_id": peer, "source_guild_id": guild, "ref": str(item.get("ref") or "").strip()}
+
+
+_SENT_DM: List[Tuple[str, float]] = []
+
+
+def _remember_sent_dm(text: str) -> None:
+    now = time.time()
+    _SENT_DM.append((text, now))
+    _SENT_DM[:] = [(t, ts) for t, ts in _SENT_DM if now - ts < 600][-20:]
+
+
+def _is_own_sent_dm(text: str) -> bool:
+    """自己发出的私信也会出现在通知里，避免回声提醒。"""
+    now = time.time()
+    return any(t == text and now - ts < 600 for t, ts in _SENT_DM)
 
 
 def _dm_notice_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """check-notices 的私信在 new_dm_notices 字段；兼容通用列表字段里的私信项。"""
-    dm = payload.get("new_dm_notices") or payload.get("dm_notices")
-    if isinstance(dm, list):
-        return [x for x in dm if isinstance(x, dict)]
+    """check-notices 的私信在 new_notices 列表里（source=dm）；兼容其它列表字段。"""
+    for key in ("new_notices", "new_dm_notices", "dm_notices"):
+        rows = payload.get(key)
+        if isinstance(rows, list):
+            return [x for x in rows if isinstance(x, dict) and _is_dm_notice(x)]
     return [x for x in _notice_items(payload) if _is_dm_notice(x)]
 
 
@@ -619,6 +641,8 @@ async def _poll_dm_slot(user: str) -> None:
     seen.extend(k for k, _ in fresh)
     _write_json_file(seen_path, {"seen": seen[-SEEN_MAX:]})
     for _, item in fresh:
+        if _is_own_sent_dm(_notice_text(item)):
+            continue
         fields = _dm_fields(item)
         nick = _item_nick(item)
         if not nick and fields["peer_tiny_id"]:
@@ -629,7 +653,7 @@ async def _poll_dm_slot(user: str) -> None:
             f"✉️ 频道私信提醒 #{seq}" + (f"｜账号：{user}" if user else ""),
             f"{nick or '对方'}：{content[:NOTIFY_TEXT_LIMIT]}",
         ]
-        if fields["peer_tiny_id"] and fields["source_guild_id"]:
+        if fields["ref"] or (fields["peer_tiny_id"] and fields["source_guild_id"]):
             lines.append(f"发送「私信回复 {seq} 内容」回复TA（不带编号默认回最新一条）")
         await _dm_admins("\n".join(lines))
 
@@ -735,21 +759,26 @@ async def handle_dm_reply(event, match):
     if not content:
         await event.reply("格式：私信回复 [编号] 内容")
         return
-    if not (found.get("peer_tiny_id") and found.get("source_guild_id")):
+    user = str(found.get("user") or "")
+    if found.get("peer_tiny_id") and found.get("source_guild_id"):
+        args = [
+            "manage", "push-group-dm-msg",
+            "--peer-tiny-id", found["peer_tiny_id"],
+            "--source-guild-id", found["source_guild_id"],
+            "--text", content,
+            "--json",
+        ]
+    elif found.get("ref"):
+        # 通知项没带对方 tinyID 时用 CLI 本地通知编号回复（自动查对方信息）
+        args = ["manage", "push-group-dm-msg", "--ref", found["ref"], "--text", content, "--json"]
+    else:
         await event.reply("这条私信提醒缺少对方信息，无法直接回复")
         return
-    user = str(found.get("user") or "")
-    args = [
-        "manage", "push-group-dm-msg",
-        "--peer-tiny-id", found["peer_tiny_id"],
-        "--source-guild-id", found["source_guild_id"],
-        "--text", content,
-        "--json",
-    ]
     ok, output = await asyncio.to_thread(_run_cli, args, None, user or None)
     output = _normalize_rate_limit(output)
     nick = found.get("nick") or "对方"
     if ok:
+        _remember_sent_dm(content)
         await event.reply(f"✅ 已私信回复 {nick}：{content[:60]}")
     else:
         await event.reply(f"❌ 私信回复失败：{str(output)[:200]}")
