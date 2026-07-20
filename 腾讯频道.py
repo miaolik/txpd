@@ -30,10 +30,21 @@ LOCAL_CLI_BINS = (
 )
 
 
-def _cli_env() -> Dict[str, str]:
-    """CLI 子进程环境：Linux/macOS 下 CLI 需要可写的 HOME（存放 ~/.qqcli 登录态与 token），
-    HOME 缺失或不可写时回退到插件目录 .home。"""
+def _cli_env(user: Optional[str] = None) -> Dict[str, str]:
+    """CLI 子进程环境。多账号模式下每个账号槽位用独立的 HOME/USERPROFILE
+    （users/槽位名）隔离 ~/.qqcli 登录态；未创建任何槽位时保持原有行为：
+    Windows 用系统环境，Linux/macOS 在 HOME 缺失或不可写时回退到插件目录 .home。"""
     env = dict(os.environ)
+    name = _safe_user_name(user) or get_current_user()
+    if name:
+        home = _user_home(name)
+        try:
+            home.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            return env
+        env["HOME"] = str(home)
+        env["USERPROFILE"] = str(home)
+        return env
     if IS_WINDOWS:
         return env
     home = env.get("HOME", "")
@@ -90,6 +101,133 @@ PLUGIN_SETTINGS = BASE_DIR / "plugin_settings.json"
 TOKEN_STORE = BASE_DIR / "token_store.json"
 ADMINS_FILE = BASE_DIR / "admins.txt"
 DEFAULT_ADMINS = ["538389445D765D2988BFE31506C54799"]
+USERS_DIR = BASE_DIR / "users"
+USERS_FILE = BASE_DIR / "users.json"
+
+
+# ==================== 账号槽位（多账号登录） ====================
+# 每个槽位对应 users/<槽位名>/ 目录，作为 CLI 子进程的 HOME，
+# 登录态（~/.qqcli）与 token_store.json 按槽位隔离。
+# 没有任何槽位时保持旧版单账号行为（系统 HOME + 插件目录 token_store.json）。
+
+def _safe_user_name(name: Any) -> str:
+    """槽位名校验：去除路径分隔符等危险字符，最长 32 字。非法返回空串。"""
+    value = str(name or "").strip()
+    if not value or value in (".", ".."):
+        return ""
+    if re.search(r'[\\/:*?"<>|\x00-\x1f]', value):
+        return ""
+    return value[:32]
+
+
+def _load_users() -> Dict[str, Any]:
+    data = _read_json_file(USERS_FILE, {})
+    users = data.get("users") if isinstance(data.get("users"), list) else []
+    users = [u for u in (_safe_user_name(x) for x in users) if u]
+    current = _safe_user_name(data.get("current"))
+    if current not in users:
+        current = users[0] if users else ""
+    nicknames = data.get("nicknames") if isinstance(data.get("nicknames"), dict) else {}
+    return {"current": current, "users": users, "nicknames": nicknames}
+
+
+def _save_users(data: Dict[str, Any]) -> None:
+    _write_json_file(USERS_FILE, data)
+
+
+def list_users() -> List[str]:
+    return _load_users()["users"]
+
+
+def get_current_user() -> str:
+    """当前账号槽位名；空字符串表示未创建任何槽位（旧版单账号模式）。"""
+    return _load_users()["current"]
+
+
+def _user_home(user: str) -> Path:
+    return USERS_DIR / user
+
+
+def add_user(name: Any) -> Tuple[bool, str]:
+    user = _safe_user_name(name)
+    if not user:
+        return False, '槽位名无效（不能含 \\ / : * ? " < > | 等字符，最长 32 字）'
+    data = _load_users()
+    if user in data["users"]:
+        return False, f"槽位「{user}」已存在"
+    if len(data["users"]) >= 20:
+        return False, "账号槽位最多 20 个，请先删除不用的槽位"
+    try:
+        _user_home(user).mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        return False, f"创建槽位目录失败：{e}"
+    first = not data["users"]
+    data["users"].append(user)
+    if not data["current"]:
+        data["current"] = user
+    _save_users(data)
+    if first:
+        _migrate_legacy_login(user)
+    return True, f"已创建账号槽位「{user}」" + ("（已设为当前槽位，并尝试迁移原有登录态）" if first else "")
+
+
+def remove_user(name: Any) -> Tuple[bool, str]:
+    user = _safe_user_name(name)
+    data = _load_users()
+    if not user or user not in data["users"]:
+        return False, f"槽位「{name}」不存在"
+    data["users"].remove(user)
+    data["nicknames"].pop(user, None)
+    if data["current"] == user:
+        data["current"] = data["users"][0] if data["users"] else ""
+    _save_users(data)
+    try:
+        shutil.rmtree(_user_home(user), ignore_errors=True)
+    except Exception:
+        pass
+    return True, f"已删除账号槽位「{user}」" + (f"，当前槽位：{data['current'] or '无'}" if data["current"] != user else "")
+
+
+def switch_user(name: Any) -> Tuple[bool, str]:
+    user = _safe_user_name(name)
+    data = _load_users()
+    if not user or user not in data["users"]:
+        return False, f"槽位「{name}」不存在，先用「频道添加账号 名称」创建"
+    data["current"] = user
+    _save_users(data)
+    return True, f"已切换到账号槽位「{user}」"
+
+
+def set_user_nickname(user: str, nickname: str) -> None:
+    data = _load_users()
+    if user in data["users"] and str(nickname or "").strip():
+        data["nicknames"][user] = str(nickname).strip()
+        _save_users(data)
+
+
+def _migrate_legacy_login(user: str) -> None:
+    """创建第一个槽位时，把旧版单账号的登录态（~/.qqcli）与 token_store 复制进槽位，
+    避免升级后需要重新扫码。失败不影响使用（重新登录即可）。"""
+    home = _user_home(user)
+    try:
+        legacy_homes = []
+        if IS_WINDOWS:
+            legacy_homes = [os.environ.get("USERPROFILE", ""), os.environ.get("HOME", "")]
+        else:
+            legacy_homes = [os.environ.get("HOME", ""), str(BASE_DIR / ".home")]
+        for legacy in legacy_homes:
+            src = Path(legacy) / ".qqcli" if legacy else None
+            if src and src.is_dir():
+                dst = home / ".qqcli"
+                if not dst.exists():
+                    shutil.copytree(src, dst)
+                break
+        if TOKEN_STORE.exists():
+            dst_store = home / "token_store.json"
+            if not dst_store.exists():
+                shutil.copyfile(TOKEN_STORE, dst_store)
+    except Exception:
+        pass
 
 
 def _load_admins() -> List[str]:
@@ -1211,9 +1349,69 @@ async def handle_move_feed(event, match):
 
 # ===================== 腾讯频道 Skill 1.1.5 同步：扫码登录 / Markdown 帖 / 通知 =====================
 
+@admin_handler(r"^频道账号列表$", ignore_at_check=True)
+async def handle_user_list(event, match):
+    data = _load_users()
+    if not data["users"]:
+        await event.reply("还没有任何账号槽位，发送「频道添加账号 名称」创建（如：频道添加账号 小号1）")
+        return
+    lines = ["👥 账号槽位列表（★ 为当前槽位）"]
+    for user in data["users"]:
+        mark = "★ " if user == data["current"] else "  "
+        nick = data["nicknames"].get(user, "")
+        lines.append(f"{mark}{user}" + (f"（{nick}）" if nick else ""))
+    lines.append("切换：频道切换账号 名称｜查看状态：频道账号状态 名称")
+    await event.reply("\n".join(lines))
+
+
+@admin_handler(r"^频道添加账号\s+\S+$", ignore_at_check=True)
+async def handle_user_add(event, match):
+    name = _text(event).split(None, 1)[1].strip()
+    ok, msg = add_user(name)
+    if ok:
+        msg += "\n登录：频道切换账号 名称 → 频道登录 → 扫码 → 频道登录确认"
+    await event.reply(msg)
+
+
+@admin_handler(r"^频道删除账号\s+\S+$", ignore_at_check=True)
+async def handle_user_remove(event, match):
+    name = _text(event).split(None, 1)[1].strip()
+    ok, msg = remove_user(name)
+    await event.reply(msg)
+
+
+@admin_handler(r"^频道切换账号\s+\S+$", ignore_at_check=True)
+async def handle_user_switch(event, match):
+    name = _text(event).split(None, 1)[1].strip()
+    ok, msg = switch_user(name)
+    await event.reply(msg)
+
+
+@admin_handler(r"^频道账号状态(?:\s+\S+)?$", ignore_at_check=True)
+async def handle_user_status(event, match):
+    parts = _text(event).split(None, 1)
+    name = parts[1].strip() if len(parts) > 1 else get_current_user()
+    if not name:
+        await event.reply("还没有任何账号槽位，发送「频道添加账号 名称」创建")
+        return
+    if name not in list_users():
+        await event.reply(f"槽位「{name}」不存在，发送「频道账号列表」查看")
+        return
+    ok, output = await asyncio.to_thread(_run_cli, ["login", "status", "--json"], None, name)
+    await event.reply(_render_result(f"账号状态｜{name}", ok, _normalize_rate_limit(output), ["login", "status", "--json"]))
+
+
 @admin_handler(r"^频道登录$", ignore_at_check=True)
 async def handle_login(event, match):
     """扫码授权登录：返回授权链接和二维码路径，扫码后发「频道登录确认」领取 token。"""
+    current = get_current_user()
+    if not current:
+        await event.reply(
+            "⚠️ 还没有创建账号槽位。\n"
+            "请先发送「频道添加账号 名称」创建一个槽位（如：频道添加账号 小号1），\n"
+            "再发「频道登录」。每个槽位登录一个频道号，互不影响。"
+        )
+        return
     ok, output = await asyncio.to_thread(_run_cli, ["login", "--json"])
     data = _extract_json(_normalize_rate_limit(output))
     payload = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else (data if isinstance(data, dict) else {})
@@ -1221,7 +1419,7 @@ async def handle_login(event, match):
     qr = str(payload.get("qrcode_path") or "").strip()
     expires = payload.get("expires_in_s")
     if ok and uri:
-        lines = ["🔑 频道扫码登录", f"授权链接：<{uri}>"]
+        lines = [f"🔑 频道扫码登录（当前槽位：{current}）", "如需登录其他号，先发「频道添加账号 名称」和「频道切换账号 名称」", f"授权链接：<{uri}>"]
         if qr:
             lines.append(f"二维码图片：{qr}")
         if expires:
@@ -1346,12 +1544,24 @@ def _write_json_file(path: Path, data: Dict[str, Any]) -> None:
         pass
 
 
-def _load_token_store() -> Dict[str, Any]:
-    return _read_json_file(TOKEN_STORE, {})
+def _token_store_path(user: Optional[str] = None) -> Path:
+    name = _safe_user_name(user) or get_current_user()
+    if name:
+        home = _user_home(name)
+        try:
+            home.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            return TOKEN_STORE
+        return home / "token_store.json"
+    return TOKEN_STORE
 
 
-def _save_token_store(data: Dict[str, Any]) -> None:
-    _write_json_file(TOKEN_STORE, data)
+def _load_token_store(user: Optional[str] = None) -> Dict[str, Any]:
+    return _read_json_file(_token_store_path(user), {})
+
+
+def _save_token_store(data: Dict[str, Any], user: Optional[str] = None) -> None:
+    _write_json_file(_token_store_path(user), data)
 
 
 def _fingerprint_token(token: str) -> str:
@@ -1361,13 +1571,13 @@ def _fingerprint_token(token: str) -> str:
     return f"{len(raw)}:{raw[:8]}:{raw[-8:]}"
 
 
-def _invalidate_self_user_cache(token_fingerprint: Optional[str] = None) -> None:
-    store = _load_token_store()
+def _invalidate_self_user_cache(token_fingerprint: Optional[str] = None, user: Optional[str] = None) -> None:
+    store = _load_token_store(user)
     store.pop("__self_user__", None)
     store.pop("__guild_roles__", None)
     if token_fingerprint is not None:
         store["__token_fp__"] = str(token_fingerprint or "")
-    _save_token_store(store)
+    _save_token_store(store, user)
 
 
 def _refresh_guild_roles(payload: Optional[Dict[str, Any]]) -> None:
@@ -1393,8 +1603,8 @@ def _refresh_guild_roles(payload: Optional[Dict[str, Any]]) -> None:
         _save_token_store(store)
 
 
-def _sync_self_user_cache_with_token() -> None:
-    ok, output = _run_cli(["manage", "token", "show", "--json"])
+def _sync_self_user_cache_with_token(user: Optional[str] = None) -> None:
+    ok, output = _run_cli(["manage", "token", "show", "--json"], user=user)
     if not ok:
         return
     data = _extract_json(output)
@@ -1403,15 +1613,15 @@ def _sync_self_user_cache_with_token() -> None:
     if not token_value:
         return
     current_fp = _fingerprint_token(token_value)
-    store = _load_token_store()
+    store = _load_token_store(user)
     cached_fp = str(store.get("__token_fp__") or "").strip()
     if cached_fp != current_fp:
-        _invalidate_self_user_cache(current_fp)
+        _invalidate_self_user_cache(current_fp, user)
 
 
-def _get_self_user_id(guild_id: Optional[str] = None) -> Optional[str]:
-    _sync_self_user_cache_with_token()
-    store = _load_token_store()
+def _get_self_user_id(guild_id: Optional[str] = None, user: Optional[str] = None) -> Optional[str]:
+    _sync_self_user_cache_with_token(user)
+    store = _load_token_store(user)
     cache = store.get("__self_user__") if isinstance(store.get("__self_user__"), dict) else {}
     cache_key = str(guild_id or "__global__")
     cached_id = str(cache.get(cache_key) or cache.get("__global__") or "").strip()
@@ -1421,7 +1631,7 @@ def _get_self_user_id(guild_id: Optional[str] = None) -> Optional[str]:
     args = ["manage", "get-user-info", "--json"]
     if guild_id:
         args[2:2] = ["--guild-id", guild_id]
-    ok, output = _run_cli(args)
+    ok, output = _run_cli(args, user=user)
     nickname = ""
     if ok:
         data = _extract_json(output)
@@ -1432,12 +1642,12 @@ def _get_self_user_id(guild_id: Optional[str] = None) -> Optional[str]:
             cache[cache_key] = user_id
             cache["__global__"] = user_id
             store["__self_user__"] = cache
-            _save_token_store(store)
+            _save_token_store(store, user)
             return user_id
     if not nickname:
         return None
 
-    ok_list, output_list = _run_cli(["manage", "get-my-join-guild-info", "--json"])
+    ok_list, output_list = _run_cli(["manage", "get-my-join-guild-info", "--json"], user=user)
     if not ok_list:
         return None
     list_data = _extract_json(output_list)
@@ -1473,7 +1683,7 @@ def _get_self_user_id(guild_id: Optional[str] = None) -> Optional[str]:
         gid = str(item.get("guild_id") or item.get("guildId") or "").strip()
         if not gid:
             continue
-        ok_search, output_search = _run_cli(["manage", "guild-member-search", "--guild-id", gid, "--keyword", nickname, "--json"])
+        ok_search, output_search = _run_cli(["manage", "guild-member-search", "--guild-id", gid, "--keyword", nickname, "--json"], user=user)
         if not ok_search:
             continue
         search_data = _extract_json(output_search)
@@ -1495,7 +1705,7 @@ def _get_self_user_id(guild_id: Optional[str] = None) -> Optional[str]:
             cache[gid] = tiny_id
             cache["__global__"] = tiny_id
             store["__self_user__"] = cache
-            _save_token_store(store)
+            _save_token_store(store, user)
             return tiny_id
         for tiny_id in set(exact):
             matches[tiny_id] = matches.get(tiny_id, 0) + 1
@@ -1504,7 +1714,7 @@ def _get_self_user_id(guild_id: Optional[str] = None) -> Optional[str]:
                 cache[gid] = tiny_id
                 cache["__global__"] = tiny_id
                 store["__self_user__"] = cache
-                _save_token_store(store)
+                _save_token_store(store, user)
                 return tiny_id
     return None
 
@@ -1695,7 +1905,7 @@ def _quick_cmd(text: str, show: Optional[str] = None, reference: Optional[bool] 
     return f"<qqbot-cmd-input {' '.join(attrs)} />"
 
 
-def _run_cli(args: List[str], stdin_text: Optional[str] = None) -> Tuple[bool, str]:
+def _run_cli(args: List[str], stdin_text: Optional[str] = None, user: Optional[str] = None) -> Tuple[bool, str]:
     cli = _resolve_cli()
     if not cli:
         return False, (
@@ -1712,7 +1922,7 @@ def _run_cli(args: List[str], stdin_text: Optional[str] = None) -> Tuple[bool, s
             encoding="utf-8",
             errors="replace",
             cwd=str(BASE_DIR),
-            env=_cli_env(),
+            env=_cli_env(user),
             timeout=90,
         )
     except subprocess.TimeoutExpired:
@@ -2071,6 +2281,10 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
             cache[cache_key] = str(uid)
             store["__self_user__"] = cache
             _save_token_store(store)
+        nick = str(payload.get("nickname") or payload.get("nick") or "").strip()
+        current = get_current_user()
+        if nick and current:
+            set_user_nickname(current, nick)
         profile_items = [
             ("nickname", "昵称"),
             ("nick", "昵称"),
@@ -2969,9 +3183,16 @@ def _help_text() -> str:
             [_quick_cmd("频道加入附言 频道ID 我想加入这个频道", "加入附言"), "附言验证加入"],
             [_quick_cmd("频道加入答题 频道ID 答案1|答案2", "加入答题"), "答题验证加入"],
         ]),
+        "## 多账号槽位",
+        *_table(["命令", "说明"], [
+            [_quick_cmd("频道账号列表"), "查看所有账号槽位及当前槽位"],
+            [_quick_cmd("频道添加账号 名称", "添加账号") + " / " + _quick_cmd("频道删除账号 名称", "删除账号"), "创建 / 删除账号槽位"],
+            [_quick_cmd("频道切换账号 名称", "切换账号"), "切换当前操作的账号（登录/发帖等都作用在当前槽位）"],
+            [_quick_cmd("频道账号状态 名称", "账号状态"), "查看指定槽位的登录状态"],
+        ]),
         "## 登录与通知（Skill 1.1.5）",
         *_table(["命令", "说明"], [
-            [_quick_cmd("频道登录") + " / " + _quick_cmd("频道登录确认"), "扫码授权登录（扫码后发确认）"],
+            [_quick_cmd("频道登录") + " / " + _quick_cmd("频道登录确认"), "扫码授权登录到当前槽位（扫码后发确认）"],
             [_quick_cmd("频道登录状态") + " / " + _quick_cmd("频道退出登录"), "查看登录状态 / 退出登录"],
             [_quick_cmd("频道版本"), "查看 CLI 版本"],
             [_quick_cmd("频道MD帖 频道ID 版块ID Markdown正文", "MD帖"), "发 Markdown 短帖"],

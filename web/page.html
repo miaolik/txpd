@@ -56,13 +56,39 @@
   </div>
 </div>
 <h2>腾讯频道管理</h2>
+<div class="row" style="margin-bottom:10px">
+  <label style="margin:0">当前账号：</label>
+  <select id="acct-select" onchange="switchAccount(this.value)"><option value="">（未创建账号槽位）</option></select>
+  <span class="muted">所有操作（查询/发帖/管理）都作用在当前账号；在「账号管理」页新建与登录</span>
+</div>
 <div class="tabs">
   <button data-tab="guilds" class="active">频道管理</button>
   <button data-tab="feeds">帖子与评论</button>
   <button data-tab="publish">立即发帖</button>
   <button data-tab="schedules">定时发帖</button>
+  <button data-tab="accounts">账号管理</button>
   <button data-tab="admins">插件管理员</button>
   <button data-tab="login">登录状态</button>
+</div>
+
+<!-- 频道/版块选择器弹窗 -->
+<div class="modal-mask" id="picker-mask">
+  <div class="modal-box" style="width:min(560px,92vw)">
+    <div class="row">
+      <b id="picker-title">选择频道</b>
+      <input id="picker-search" placeholder="输入关键词搜索" style="flex:1" oninput="renderPicker()">
+      <button class="btn sm gray" onclick="closePicker()">关闭</button>
+    </div>
+    <div id="picker-list" style="max-height:50vh;overflow:auto;margin-top:8px"></div>
+  </div>
+</div>
+
+<!-- 历史记录弹窗 -->
+<div class="modal-mask" id="hist-mask">
+  <div class="modal-box" style="width:min(640px,92vw)">
+    <div class="row"><b>编辑历史（点击一条插入表单）</b><button class="btn sm gray" style="margin-left:auto" onclick="closeHistory()">关闭</button></div>
+    <div id="hist-list" style="max-height:55vh;overflow:auto;margin-top:8px"></div>
+  </div>
 </div>
 
 <!-- ═══ 频道管理 ═══ -->
@@ -117,7 +143,7 @@
 <div class="tab-page hidden" id="page-publish">
   <div class="card">
     <div class="grid2">
-      <div><label>频道ID *</label><input id="pub-guild" style="width:100%"></div>
+      <div><label>频道ID *</label><div class="row" style="margin:0;flex-wrap:nowrap"><input id="pub-guild" style="flex:1"><button class="btn sm gray" onclick="openPicker('pub')">选择频道/版块</button></div></div>
       <div><label>版块ID *</label><input id="pub-channel" style="width:100%"></div>
       <div><label>标题（长帖需要，短帖留空）</label><input id="pub-title" style="width:100%"></div>
       <div><label>内容格式</label>
@@ -134,7 +160,10 @@
       <div><label>图片（本地路径或URL，一行一个）</label><textarea id="pub-images" style="min-height:60px"></textarea></div>
       <div><label>视频（本地路径或URL，一行一个）</label><textarea id="pub-videos" style="min-height:60px"></textarea></div>
     </div>
-    <div class="row" style="margin-top:10px"><button class="btn green" onclick="publishNow()">立即发帖</button></div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn green" onclick="publishNow()">立即发帖</button>
+      <button class="btn gray" onclick="openHistory('pub')">历史记录</button>
+    </div>
     <div class="muted">短贴 ≤1000字/≤18图/≤1视频（图与视频互斥）；长贴（填标题）≤10000字/≤50图/≤5视频。</div>
   </div>
 </div>
@@ -152,8 +181,9 @@
     <div class="grid2" style="margin-top:10px">
       <div><label>计划名称</label><input id="sch-name" style="width:100%"></div>
       <div><label>Cron 表达式 *</label><input id="sch-cron" style="width:100%" placeholder="0 9 * * *"></div>
-      <div><label>频道ID *</label><input id="sch-guild" style="width:100%"></div>
+      <div><label>频道ID *</label><div class="row" style="margin:0;flex-wrap:nowrap"><input id="sch-guild" style="flex:1"><button class="btn sm gray" onclick="openPicker('sch')">选择频道/版块</button></div></div>
       <div><label>版块ID *</label><input id="sch-channel" style="width:100%"></div>
+      <div><label>发帖账号（留空 = 保存时的当前账号）</label><select id="sch-user" style="width:100%"><option value="">跟随当前账号</option></select></div>
       <div><label>标题（长帖需要，短帖留空）</label><input id="sch-title" style="width:100%"></div>
       <div><label>内容格式</label>
         <select id="sch-format" style="width:100%">
@@ -173,6 +203,7 @@
     <div class="row" style="margin-top:10px">
       <button class="btn green" onclick="saveSchedule()">保存计划</button>
       <button class="btn gray" onclick="resetScheduleForm()">清空表单</button>
+      <button class="btn gray" onclick="openHistory('sch')">历史记录</button>
     </div>
   </div>
   <div class="card">
@@ -191,6 +222,24 @@
       <button class="btn gray" onclick="loadAdmins()">刷新</button>
     </div>
     <div class="muted">对应插件目录下的 admins.txt，# 开头的行为注释。至少保留一个管理员。</div>
+  </div>
+</div>
+
+<!-- ═══ 账号管理 ═══ -->
+<div class="tab-page hidden" id="page-accounts">
+  <div class="card">
+    <div class="row">
+      <b>账号槽位</b>
+      <input id="new-acct-name" placeholder="新槽位名称（如：小号1）">
+      <button class="btn green" onclick="addAccount()">创建账号槽位</button>
+      <button class="btn sm gray" onclick="loadUsers()">刷新</button>
+    </div>
+    <div class="muted">每个槽位登录一个频道号，登录态按槽位隔离互不影响。登录流程：创建槽位 → 点「登录」获取授权链接 → 手机扫码 → 点「登录确认」。</div>
+    <div id="acct-list"></div>
+  </div>
+  <div class="card hidden" id="acct-result-card">
+    <div class="row"><b id="acct-result-title"></b></div>
+    <div id="acct-result"></div>
   </div>
 </div>
 
@@ -222,7 +271,7 @@ async function api(path, body, method) {
   const res = await fetch(url, opts);
   return res.json();
 }
-const cli = (action, params) => api('cli', { action, params: params || {} });
+const cli = (action, params) => api('cli', { action, params: params || {}, user: selectedUser() });
 
 // 页内弹窗（代替原生 confirm/prompt，避免 iframe 里原生对话框被浏览器拦截导致按钮无反应）
 function _modal(msg, withInput, defVal) {
@@ -272,6 +321,188 @@ document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
   document.querySelectorAll('.tab-page').forEach(p => p.classList.add('hidden'));
   document.getElementById('page-' + b.dataset.tab).classList.remove('hidden');
 });
+
+// ═══ 账号槽位 ═══
+let _users = { current: '', users: [], nicknames: {} };
+const selectedUser = () => document.getElementById('acct-select').value || _users.current || '';
+
+function renderUsers() {
+  const sel = document.getElementById('acct-select');
+  sel.innerHTML = _users.users.length
+    ? _users.users.map(u => `<option value="${esc(u)}" ${u === _users.current ? 'selected' : ''}>${esc(u)}${_users.nicknames[u] ? '（' + esc(_users.nicknames[u]) + '）' : ''}</option>`).join('')
+    : '<option value="">（未创建账号槽位）</option>';
+  const schSel = document.getElementById('sch-user');
+  const kept = schSel.value;
+  schSel.innerHTML = '<option value="">跟随当前账号</option>' + _users.users.map(u => `<option value="${esc(u)}">${esc(u)}${_users.nicknames[u] ? '（' + esc(_users.nicknames[u]) + '）' : ''}</option>`).join('');
+  if (_users.users.includes(kept)) schSel.value = kept;
+  const el = document.getElementById('acct-list');
+  if (!_users.users.length) { el.innerHTML = '<div class="muted" style="margin-top:8px">还没有账号槽位，先在上方创建一个（如：小号1），再登录。</div>'; return; }
+  let html = '<table><tr><th>槽位</th><th>昵称</th><th>当前</th><th>操作</th></tr>';
+  for (const u of _users.users) {
+    html += `<tr><td>${esc(u)}</td><td>${esc(_users.nicknames[u] || '-')}</td>
+      <td>${u === _users.current ? '<span class="badge on">当前</span>' : ''}</td><td>
+      <button class="btn sm" onclick="switchAccount('${esc(u)}')">切换</button>
+      <button class="btn sm" onclick="acctStatus('${esc(u)}')">状态</button>
+      <button class="btn sm green" onclick="acctLogin('${esc(u)}')">登录</button>
+      <button class="btn sm green" onclick="acctLoginPoll('${esc(u)}')">登录确认</button>
+      <button class="btn sm gray" onclick="acctLogout('${esc(u)}')">退出登录</button>
+      <button class="btn sm red" onclick="deleteAccount('${esc(u)}')">删除</button>
+    </td></tr>`;
+  }
+  el.innerHTML = html + '</table>';
+}
+
+async function loadUsers() {
+  const r = await api('users');
+  if (r.success && r.data) { _users = r.data; renderUsers(); }
+}
+async function addAccount() {
+  const name = document.getElementById('new-acct-name').value.trim();
+  if (!name) return toast('请输入槽位名称', false);
+  const r = await api('users', { op: 'add', name });
+  toast(r.message || (r.success ? '已创建' : '失败'), r.success);
+  if (r.success) { document.getElementById('new-acct-name').value = ''; _users = r.data; renderUsers(); }
+}
+async function deleteAccount(name) {
+  if (!await uiConfirm(`确认删除账号槽位「${name}」？会删除该槽位的登录态！`)) return;
+  const r = await api('users', { op: 'delete', name });
+  toast(r.message || '已删除', r.success);
+  if (r.success) { _users = r.data; renderUsers(); }
+}
+async function switchAccount(name) {
+  if (!name) return;
+  const r = await api('users', { op: 'switch', name });
+  toast(r.message || '已切换', r.success);
+  if (r.success) { _users = r.data; renderUsers(); }
+}
+function _acctResult(title, r) {
+  const card = document.getElementById('acct-result-card');
+  reveal(card);
+  document.getElementById('acct-result-title').textContent = title;
+  renderJson(document.getElementById('acct-result'), r);
+}
+async function acctStatus(name) {
+  toast('查询中...', true);
+  const r = await api('users/status', { name });
+  if (r.success && r.data) {
+    if (r.data.nickname) { _users.nicknames[name] = r.data.nickname; renderUsers(); }
+    _acctResult(`登录状态｜${name}${r.data.nickname ? '（' + r.data.nickname + '）' : ''}`, r.data.status);
+  } else {
+    toast(r.message || '查询失败', false);
+  }
+}
+async function acctLogin(name) {
+  toast('获取授权链接中...', true);
+  const r = await api('cli', { action: 'login', params: {}, user: name });
+  _acctResult(`扫码登录｜${name}（扫码后点「登录确认」）`, r);
+}
+async function acctLoginPoll(name) {
+  toast('确认中...', true);
+  const r = await api('cli', { action: 'login-poll', params: {}, user: name });
+  _acctResult(`登录确认｜${name}`, r);
+  if (r.success) acctStatus(name);
+}
+async function acctLogout(name) {
+  if (!await uiConfirm(`确认退出槽位「${name}」的登录？`)) return;
+  const r = await api('cli', { action: 'logout', params: {}, user: name });
+  _acctResult(`退出登录｜${name}`, r);
+}
+
+// ═══ 频道/版块选择器 ═══
+let _picker = { prefix: '', step: 'guild', guilds: [], channels: [], guild: null };
+
+async function openPicker(prefix) {
+  _picker = { prefix, step: 'guild', guilds: [], channels: [], guild: null };
+  document.getElementById('picker-mask').style.display = 'flex';
+  document.getElementById('picker-search').value = '';
+  document.getElementById('picker-title').textContent = '选择频道';
+  document.getElementById('picker-list').innerHTML = '<div class="muted">加载频道列表中...</div>';
+  const r = await cli('guilds');
+  if (!r.success) { document.getElementById('picker-list').innerHTML = `<div class="muted">加载失败：${esc(r.message || '')}</div>`; return; }
+  const p = payloadOf(r);
+  const seen = new Set();
+  const guilds = [];
+  for (const key of ['created_guilds', 'managed_guilds', 'joined_guilds', 'guilds', 'guild_list', 'items', 'list']) {
+    const arr = p[key];
+    if (!Array.isArray(arr)) continue;
+    for (const g of arr) {
+      const gid = pick(g, ['guild_id', 'guildId', 'id']);
+      if (!gid || seen.has(gid)) continue;
+      seen.add(gid);
+      guilds.push({ id: gid, name: pick(g, ['guild_name', 'guildName', 'name']) || '-' });
+    }
+  }
+  _picker.guilds = guilds;
+  renderPicker();
+}
+function closePicker() { document.getElementById('picker-mask').style.display = 'none'; }
+function renderPicker() {
+  const kw = document.getElementById('picker-search').value.trim().toLowerCase();
+  const el = document.getElementById('picker-list');
+  if (_picker.step === 'guild') {
+    const items = _picker.guilds.filter(g => !kw || g.name.toLowerCase().includes(kw) || String(g.id).includes(kw));
+    el.innerHTML = items.length
+      ? '<table><tr><th>频道名</th><th>频道ID</th><th></th></tr>' + items.map(g => `<tr><td>${esc(g.name)}</td><td>${esc(g.id)}</td><td><button class="btn sm" onclick="pickGuild('${esc(g.id)}')">选择</button></td></tr>`).join('') + '</table>'
+      : '<div class="muted">没有匹配的频道</div>';
+  } else {
+    const items = _picker.channels.filter(c => !kw || c.name.toLowerCase().includes(kw) || String(c.id).includes(kw));
+    el.innerHTML = items.length
+      ? '<table><tr><th>版块名</th><th>版块ID</th><th></th></tr>' + items.map(c => `<tr><td>${esc(c.name)}</td><td>${esc(c.id)}</td><td><button class="btn sm" onclick="pickChannel('${esc(c.id)}')">选择</button></td></tr>`).join('') + '</table>'
+      : '<div class="muted">没有匹配的版块</div>';
+  }
+}
+async function pickGuild(gid) {
+  _picker.guild = gid;
+  _picker.step = 'channel';
+  document.getElementById('picker-title').textContent = `选择版块（频道 ${gid}）`;
+  document.getElementById('picker-search').value = '';
+  document.getElementById('picker-list').innerHTML = '<div class="muted">加载版块列表中...</div>';
+  const r = await cli('channels', { guild_id: gid });
+  if (!r.success) { document.getElementById('picker-list').innerHTML = `<div class="muted">加载失败：${esc(r.message || '')}</div>`; return; }
+  const items = listOf(payloadOf(r), ['channels', 'channel_list', 'items', 'list']);
+  _picker.channels = items.map(c => ({ id: pick(c, ['channel_id', 'channelId', 'id']), name: pick(c, ['channel_name', 'channelName', 'name']) || '-' })).filter(c => c.id);
+  renderPicker();
+}
+function pickChannel(cid) {
+  document.getElementById(_picker.prefix + '-guild').value = _picker.guild;
+  document.getElementById(_picker.prefix + '-channel').value = cid;
+  closePicker();
+  toast('已填入频道ID与版块ID', true);
+}
+
+// ═══ 编辑历史 ═══
+let _histTarget = 'pub';
+async function openHistory(prefix) {
+  _histTarget = prefix;
+  document.getElementById('hist-mask').style.display = 'flex';
+  const el = document.getElementById('hist-list');
+  el.innerHTML = '<div class="muted">加载中...</div>';
+  const r = await api('history');
+  const items = (r.data && r.data.history) || [];
+  window._hist = items;
+  if (!items.length) { el.innerHTML = '<div class="muted">暂无历史记录（发帖/保存定时计划后自动记录）</div>'; return; }
+  el.innerHTML = '<table><tr><th>时间</th><th>类型</th><th>标题/内容</th><th>频道/版块</th><th></th></tr>' + items.map((h, i) =>
+    `<tr><td class="muted">${esc(h.ts || '')}</td><td>${h.kind === 'schedule' ? '定时' : '发帖'}</td>
+     <td>${esc((h.title || h.content || '').slice(0, 40))}</td>
+     <td class="muted">${esc(h.guild_id)}<br>${esc(h.channel_id)}</td>
+     <td><button class="btn sm" onclick="applyHistory(${i})">插入</button></td></tr>`).join('') + '</table>';
+}
+function closeHistory() { document.getElementById('hist-mask').style.display = 'none'; }
+function applyHistory(i) {
+  const h = (window._hist || [])[i];
+  if (!h) return;
+  const p = _histTarget;
+  document.getElementById(p + '-guild').value = h.guild_id || '';
+  document.getElementById(p + '-channel').value = h.channel_id || '';
+  document.getElementById(p + '-title').value = h.title || '';
+  document.getElementById(p + '-format').value = h.format || 'text';
+  document.getElementById(p + '-content').value = h.content || '';
+  document.getElementById(p + '-images').value = (h.images || []).join('\n');
+  document.getElementById(p + '-videos').value = (h.videos || []).join('\n');
+  if (p === 'sch' && h.user && _users.users.includes(h.user)) document.getElementById('sch-user').value = h.user;
+  closeHistory();
+  toast('已插入历史内容，可编辑后发布', true);
+}
 
 // ═══ 频道管理 ═══
 let currentGuild = '';
@@ -612,6 +843,7 @@ async function publishNow() {
     content: document.getElementById('pub-content').value,
     images: splitLines(document.getElementById('pub-images').value),
     videos: splitLines(document.getElementById('pub-videos').value),
+    user: selectedUser(),
   };
   const r = await api('publish', body);
   toast(r.message || (r.success ? '发帖成功' : '失败'), r.success);
@@ -622,6 +854,7 @@ function setCron(expr) { document.getElementById('sch-cron').value = expr; }
 function resetScheduleForm() {
   ['sch-id', 'sch-name', 'sch-cron', 'sch-guild', 'sch-channel', 'sch-title', 'sch-content', 'sch-images', 'sch-videos'].forEach(id => document.getElementById(id).value = '');
   document.getElementById('sch-format').value = 'text';
+  document.getElementById('sch-user').value = '';
 }
 async function saveSchedule() {
   const editingId = document.getElementById('sch-id').value;
@@ -637,6 +870,7 @@ async function saveSchedule() {
     content: document.getElementById('sch-content').value,
     images: splitLines(document.getElementById('sch-images').value),
     videos: splitLines(document.getElementById('sch-videos').value),
+    user: document.getElementById('sch-user').value || selectedUser(),
     enabled: existing ? !!existing.enabled : true,
   };
   const r = await api('schedules/save', body);
@@ -650,11 +884,12 @@ async function loadSchedules() {
   const r = await api('schedules');
   _schedules = (r.data && r.data.schedules) || [];
   if (!_schedules.length) { el.innerHTML = '<div class="muted">暂无计划</div>'; return; }
-  let html = '<table><tr><th>名称</th><th>Cron</th><th>频道/版块</th><th>格式</th><th>状态</th><th>最近执行</th><th>操作</th></tr>';
+  let html = '<table><tr><th>名称</th><th>Cron</th><th>频道/版块</th><th>账号</th><th>格式</th><th>状态</th><th>最近执行</th><th>操作</th></tr>';
   for (const s of _schedules) {
     html += `<tr>
       <td>${esc(s.name)}</td><td>${esc(s.cron)}</td>
       <td>${esc(s.guild_id)}<br>${esc(s.channel_id)}</td>
+      <td>${esc(s.user || '-')}</td>
       <td>${esc(s.format)}</td>
       <td><span class="badge ${s.enabled ? 'on' : 'off'}">${s.enabled ? '启用' : '停用'}</span></td>
       <td class="muted">${esc(s.last_run || '-')}<br>${esc((s.last_result || '').slice(0, 60))}</td>
@@ -680,6 +915,7 @@ function editSchedule(id) {
   document.getElementById('sch-content').value = s.content || '';
   document.getElementById('sch-images').value = (s.images || []).join('\n');
   document.getElementById('sch-videos').value = (s.videos || []).join('\n');
+  document.getElementById('sch-user').value = _users.users.includes(s.user) ? s.user : '';
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 async function toggleSchedule(id) {
@@ -719,7 +955,7 @@ async function checkLogin() {
 }
 
 // 初始加载
-loadGuilds();
+loadUsers().then(loadGuilds);
 loadSchedules();
 loadAdmins();
 </script>

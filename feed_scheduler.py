@@ -20,6 +20,8 @@ from core.plugin.decorators import on_load, on_unload
 from .腾讯频道 import BASE_DIR, _extract_json, _normalize_rate_limit, _run_cli
 
 SCHEDULES_FILE = BASE_DIR / "feed_schedules.json"
+HISTORY_FILE = BASE_DIR / "post_history.json"
+HISTORY_MAX = 30
 
 CRON_EXAMPLES = [
     ("0 9 * * *", "每天9点"),
@@ -221,6 +223,41 @@ def save_schedules(schedules: List[Dict[str, Any]]) -> bool:
         return False
 
 
+def load_history() -> List[Dict[str, Any]]:
+    try:
+        if HISTORY_FILE.exists():
+            data = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return data
+    except Exception:
+        pass
+    return []
+
+
+def record_history(entry: Dict[str, Any]) -> None:
+    """记录一条发帖/定时发帖的编辑历史（最新在前，同内容去重，最多保留 HISTORY_MAX 条）。"""
+    try:
+        item = {
+            "ts": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "kind": str(entry.get("kind") or "publish"),
+            "user": str(entry.get("user") or ""),
+            "guild_id": str(entry.get("guild_id") or ""),
+            "channel_id": str(entry.get("channel_id") or ""),
+            "title": str(entry.get("title") or ""),
+            "format": str(entry.get("format") or "text"),
+            "content": str(entry.get("content") or ""),
+            "images": [str(x) for x in (entry.get("images") or [])],
+            "videos": [str(x) for x in (entry.get("videos") or [])],
+        }
+        history = load_history()
+        key = (item["guild_id"], item["channel_id"], item["title"], item["content"])
+        history = [h for h in history if (str(h.get("guild_id") or ""), str(h.get("channel_id") or ""), str(h.get("title") or ""), str(h.get("content") or "")) != key]
+        history.insert(0, item)
+        HISTORY_FILE.write_text(json.dumps(history[:HISTORY_MAX], ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def normalize_schedule(body: Dict[str, Any]) -> Dict[str, Any]:
     """校验并规范化一条计划任务，返回 {'error': ...} 或规范化后的任务。"""
     cron = str(body.get("cron") or "").strip()
@@ -246,6 +283,7 @@ def normalize_schedule(body: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "id": str(body.get("id") or "").strip() or uuid.uuid4().hex[:12],
         "name": str(body.get("name") or "").strip() or "未命名计划",
+        "user": str(body.get("user") or "").strip(),
         "cron": cron,
         "guild_id": guild_id,
         "channel_id": channel_id,
@@ -288,8 +326,8 @@ def build_publish_args(schedule: Dict[str, Any]) -> List[str]:
 
 
 def run_schedule_sync(schedule: Dict[str, Any]) -> Dict[str, Any]:
-    """执行一条计划任务（同步，在线程池中调用），返回执行结果摘要。"""
-    ok, output = _run_cli(build_publish_args(schedule))
+    """执行一条计划任务（同步，在线程池中调用），用计划指定的账号槽位发帖。"""
+    ok, output = _run_cli(build_publish_args(schedule), user=str(schedule.get("user") or "").strip() or None)
     output = _normalize_rate_limit(output)
     data = _extract_json(output)
     message = ""
