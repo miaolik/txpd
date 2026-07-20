@@ -146,7 +146,7 @@ def _notice_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _notice_text(item: Dict[str, Any]) -> str:
-    return str(item.get("content") or item.get("summary") or item.get("title") or item.get("desc") or item.get("msg") or "").strip()
+    return str(item.get("content") or item.get("content_text") or item.get("text") or item.get("summary") or item.get("title") or item.get("desc") or item.get("msg") or "").strip()
 
 
 def _notice_feed(item: Dict[str, Any]) -> Tuple[str, str]:
@@ -581,13 +581,21 @@ def _is_dm_notice(item: Dict[str, Any]) -> bool:
     kind = str(item.get("type") or item.get("notice_type") or item.get("noticeType") or "").lower()
     if "dm" in kind or "private" in kind:
         return True
-    return "私信" in _notice_text(item) or bool(item.get("peer_tiny_id") or item.get("peerTinyId"))
+    return "私信" in _notice_text(item) or bool(item.get("peer_tiny_id") or item.get("peerTinyId") or item.get("from_tiny_id"))
 
 
 def _dm_fields(item: Dict[str, Any]) -> Dict[str, str]:
-    peer = str(item.get("peer_tiny_id") or item.get("peerTinyId") or item.get("tiny_id") or item.get("poster_tiny_id") or item.get("sender_tiny_id") or "").strip()
+    peer = str(item.get("peer_tiny_id") or item.get("peerTinyId") or item.get("from_tiny_id") or item.get("tiny_id") or item.get("poster_tiny_id") or item.get("sender_tiny_id") or "").strip()
     guild = str(item.get("source_guild_id") or item.get("sourceGuildId") or item.get("guild_id") or item.get("guildId") or "").strip()
     return {"peer_tiny_id": peer, "source_guild_id": guild}
+
+
+def _dm_notice_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """check-notices 的私信在 new_dm_notices 字段；兼容通用列表字段里的私信项。"""
+    dm = payload.get("new_dm_notices") or payload.get("dm_notices")
+    if isinstance(dm, list):
+        return [x for x in dm if isinstance(x, dict)]
+    return [x for x in _notice_items(payload) if _is_dm_notice(x)]
 
 
 async def _poll_dm_slot(user: str) -> None:
@@ -596,26 +604,21 @@ async def _poll_dm_slot(user: str) -> None:
     if not ok:
         return
     payload = _payload_of(output)
-    items = _notice_items(payload)
-    seen_path = (_user_home(user) if user else BASE_DIR) / "dm_notify_seen.json"
+    items = _dm_notice_items(payload)
     if not items:
-        if not seen_path.exists():
-            _write_json_file(seen_path, {"seen": []})
         return
+    # check-notices 本身是增量接口（CLI 自己维护基线），返回的都是新通知；
+    # 本地 seen 只做去重，不做首次基线吞掉。
+    seen_path = (_user_home(user) if user else BASE_DIR) / "dm_notify_seen.json"
     data = _read_json_file(seen_path, {})
     seen = [str(x) for x in data.get("seen", [])] if isinstance(data.get("seen"), list) else []
-    first_run = not seen and not seen_path.exists()
     seen_set = set(seen)
     fresh = [(k, item) for item in items if (k := _notice_key(item)) not in seen_set]
     if not fresh:
         return
     seen.extend(k for k, _ in fresh)
     _write_json_file(seen_path, {"seen": seen[-SEEN_MAX:]})
-    if first_run:
-        return
     for _, item in fresh:
-        if not _is_dm_notice(item):
-            continue
         fields = _dm_fields(item)
         nick = _item_nick(item)
         if not nick and fields["peer_tiny_id"]:
