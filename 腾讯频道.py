@@ -30,6 +30,23 @@ LOCAL_CLI_BINS = (
 )
 
 
+def _cli_env() -> Dict[str, str]:
+    """CLI 子进程环境：Linux/macOS 下 CLI 需要可写的 HOME（存放 ~/.qqcli 登录态与 token），
+    HOME 缺失或不可写时回退到插件目录 .home。"""
+    env = dict(os.environ)
+    if IS_WINDOWS:
+        return env
+    home = env.get("HOME", "")
+    if not home or not os.path.isdir(home) or not os.access(home, os.W_OK):
+        fallback = BASE_DIR / ".home"
+        try:
+            fallback.mkdir(exist_ok=True)
+        except Exception:
+            return env
+        env["HOME"] = str(fallback)
+    return env
+
+
 def _ensure_executable(path: Path) -> None:
     try:
         if not os.access(path, os.X_OK):
@@ -1695,6 +1712,7 @@ def _run_cli(args: List[str], stdin_text: Optional[str] = None) -> Tuple[bool, s
             encoding="utf-8",
             errors="replace",
             cwd=str(BASE_DIR),
+            env=_cli_env(),
             timeout=90,
         )
     except subprocess.TimeoutExpired:
