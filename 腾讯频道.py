@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import uuid
@@ -104,6 +105,11 @@ def _resolve_cli() -> Optional[str]:
     return None
 PLUGIN_SETTINGS = BASE_DIR / "plugin_settings.json"
 TOKEN_STORE = BASE_DIR / "token_store.json"
+# Windows（凭据管理器）/ macOS（钥匙串）的 CLI 登录态是系统级全局存储，不随
+# HOME 隔离；多账号槽位需要在切换使用时把该槽位的 token 重新写回钥匙串。
+KEYCHAIN_GLOBAL = IS_WINDOWS or sys.platform == "darwin"
+KEYCHAIN_OWNER_FILE = BASE_DIR / "keychain_owner.json"
+_KEYCHAIN_LOCK = threading.Lock()
 ADMINS_FILE = BASE_DIR / "admins.txt"
 DEFAULT_ADMINS = ["538389445D765D2988BFE31506C54799"]
 USERS_DIR = BASE_DIR / "users"
@@ -186,6 +192,11 @@ def remove_user(name: Any) -> Tuple[bool, str]:
     if data["current"] == user:
         data["current"] = data["users"][0] if data["users"] else ""
     _save_users(data)
+    if KEYCHAIN_GLOBAL and _read_keychain_owner() == user:
+        # 被删槽位正占用全局钥匙串，退出登录防止其他槽位误用它的 token
+        with _KEYCHAIN_LOCK:
+            _run_cli_raw(["login", "logout", "--json"], user=user)
+            _write_keychain_owner("")
     try:
         shutil.rmtree(_user_home(user), ignore_errors=True)
     except Exception:
@@ -1966,7 +1977,108 @@ def _run_cli_compat(primary: List[str], fallback: List[str], user: Optional[str]
     return ok, output
 
 
+def _read_keychain_owner() -> str:
+    data = _read_json_file(KEYCHAIN_OWNER_FILE, {})
+    return str(data.get("owner") or "").strip()
+
+
+def _write_keychain_owner(owner: str) -> None:
+    _write_json_file(KEYCHAIN_OWNER_FILE, {"owner": str(owner or "")})
+
+
+def _get_slot_token(user: str) -> str:
+    store = _load_token_store(user)
+    return str(store.get("__login_token__") or "").strip()
+
+
+def _set_slot_token(user: str, token: str) -> None:
+    store = _load_token_store(user)
+    store["__login_token__"] = str(token or "")
+    _save_token_store(store, user)
+
+
+def _extract_token_from_show(output: str) -> str:
+    data = _extract_json(output)
+    payload = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else {}
+    return str(payload.get("token") or payload.get("access_token") or payload.get("raw") or "").strip()
+
+
+def _capture_slot_token(user: str) -> str:
+    """从钥匙串读出当前生效的 token 并存入该槽位自己的 token_store。"""
+    if "manage token show" in _UNSUPPORTED_CLI_CMDS:
+        return ""
+    ok, output = _run_cli_raw(["manage", "token", "show", "--json"], user=user)
+    if not ok:
+        if _is_unknown_command(output):
+            _UNSUPPORTED_CLI_CMDS.add("manage token show")
+        return ""
+    token = _extract_token_from_show(output)
+    if token:
+        _set_slot_token(user, token)
+    return token
+
+
+def _apply_slot_token(user: str, token: str) -> bool:
+    """把槽位保存的 token 写回钥匙串（新版 login token，旧版 token setup）。"""
+    ok, output = _run_cli_raw(["login", "token", token], user=user)
+    if not ok and _is_unknown_command(output):
+        ok, output = _run_cli_raw(["token", "setup", token], user=user)
+    return ok
+
+
+def _ensure_keychain_slot(slot: str) -> None:
+    """Windows/macOS 下钥匙串是全局存储，不随 HOME 隔离；在以另一个槽位
+    身份调用 CLI 前，先把原占用者的 token 存回其自己的目录，再把目标槽位的
+    token 写入钥匙串；目标槽位没登录过则退出登录，避免继续用上一个账号。"""
+    if not KEYCHAIN_GLOBAL or not slot:
+        return
+    owner = _read_keychain_owner()
+    if not owner:
+        # 升级迁移：首次启用时钥匙串里的登录态归属当前槽位
+        owner = get_current_user()
+        if owner:
+            _capture_slot_token(owner)
+            _write_keychain_owner(owner)
+    if owner == slot:
+        return
+    if owner:
+        _capture_slot_token(owner)
+    token = _get_slot_token(slot)
+    if token:
+        if _apply_slot_token(slot, token):
+            _write_keychain_owner(slot)
+        return
+    _run_cli_raw(["login", "logout", "--json"], user=slot)
+    _write_keychain_owner(slot)
+
+
+def _keychain_post_hook(args: List[str], ok: bool, slot: str) -> None:
+    """登录/配置/退出后同步槽位自己的 token 备份与钥匙串占用者标记。"""
+    if not ok or not slot:
+        return
+    head = tuple(args[:2])
+    if head == ("login", "poll-token"):
+        _capture_slot_token(slot)
+        _write_keychain_owner(slot)
+    elif head in (("token", "setup"), ("login", "token")) and len(args) >= 3:
+        _set_slot_token(slot, str(args[2]))
+        _write_keychain_owner(slot)
+    elif head == ("login", "logout"):
+        _set_slot_token(slot, "")
+
+
 def _run_cli(args: List[str], stdin_text: Optional[str] = None, user: Optional[str] = None) -> Tuple[bool, str]:
+    slot = _safe_user_name(user) or get_current_user()
+    if KEYCHAIN_GLOBAL and slot:
+        with _KEYCHAIN_LOCK:
+            _ensure_keychain_slot(slot)
+            ok, output = _run_cli_raw(args, stdin_text, slot)
+            _keychain_post_hook(args, ok, slot)
+            return ok, output
+    return _run_cli_raw(args, stdin_text, user)
+
+
+def _run_cli_raw(args: List[str], stdin_text: Optional[str] = None, user: Optional[str] = None) -> Tuple[bool, str]:
     cli = _resolve_cli()
     if not cli:
         return False, (

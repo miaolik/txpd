@@ -8,4 +8,5 @@ feed_schedules.json
 .qqcli/
 users/
 users.json
+keychain_owner.json
 post_history.json
