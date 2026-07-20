@@ -16,10 +16,11 @@
 import asyncio
 import hashlib
 import json
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from core.plugin.decorators import on_load, on_unload
+from core.plugin.decorators import interceptor, on_load, on_unload
 
 from .腾讯频道 import (
     BASE_DIR,
@@ -41,10 +42,55 @@ from .腾讯频道 import (
 POLL_INTERVAL = 60
 SEEN_MAX = 300
 NOTIFY_TEXT_LIMIT = 120
+CTX_MAX = 50
+# QQ 被动回复窗口：msg_id 在 5 分钟内可关联发送（不占主动推送额度且即时送达）
+PASSIVE_WINDOW = 270
+PASSIVE_MAX_USES = 4
 _TASK_NAME = "txpd_comment_notify"
 
-# 最近一次提醒的回复上下文（快速回复用）
-_LAST_CTX: Dict[str, Any] = {}
+# 提醒上下文按编号保存（「评论回复 编号 内容」/「私信回复 编号 内容」）
+_CTXS: Dict[int, Dict[str, Any]] = {}
+_CTX_SEQ = [0]
+
+# 管理员最近一条消息的 msg_id，用于把主动推送变成被动回复（即时送达）
+_ADMIN_MSG: Dict[str, Dict[str, Any]] = {}
+
+
+def _push_ctx(ctx: Dict[str, Any]) -> int:
+    _CTX_SEQ[0] += 1
+    seq = _CTX_SEQ[0]
+    _CTXS[seq] = ctx
+    while len(_CTXS) > CTX_MAX:
+        _CTXS.pop(min(_CTXS), None)
+    return seq
+
+
+def _latest_ctx(kind: str) -> Optional[Dict[str, Any]]:
+    for seq in sorted(_CTXS, reverse=True):
+        if _CTXS[seq].get("kind") == kind:
+            return _CTXS[seq]
+    return None
+
+
+@interceptor(priority=-100)
+async def _record_admin_msg(event):
+    try:
+        user_id = str(event.user_id or "")
+        if user_id and event.message_id and user_id in _load_admins():
+            _ADMIN_MSG[user_id] = {"msg_id": event.message_id, "ts": time.time(), "uses": 0}
+    except Exception:
+        pass
+    return False
+
+
+def _passive_msg_id(admin: str) -> Optional[str]:
+    rec = _ADMIN_MSG.get(admin)
+    if not rec:
+        return None
+    if time.time() - rec["ts"] > PASSIVE_WINDOW or rec["uses"] >= PASSIVE_MAX_USES:
+        return None
+    rec["uses"] += 1
+    return str(rec["msg_id"])
 
 
 def notify_enabled() -> bool:
@@ -213,10 +259,8 @@ def _fetch_feed_context(feed_id: str, guild_id: str, user: str) -> Dict[str, Any
     return ctx
 
 
-def _newest_target(ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """在评论及其回复中找最新一条，作为「评论回复」的目标。"""
-    best: Optional[Dict[str, Any]] = None
-    best_ts = -1
+def _iter_targets(ctx: Dict[str, Any]):
+    """遍历评论及楼中楼回复，产出 (时间戳, 回复目标上下文)。"""
     for comment in ctx["comments"]:
         cid = str(comment.get("comment_id") or comment.get("commentId") or "").strip()
         comment_author = _item_author_id(comment)
@@ -230,10 +274,9 @@ def _newest_target(ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "comment_author_id": comment_author,
             "comment_create_time": comment_ts,
         }
-        ts = _create_time(comment)
-        if cid and comment_author and comment_ts and ts >= best_ts:
-            best_ts = ts
-            best = {**base, "nick": _item_nick(comment), "content": _comment_content(comment)}
+        if not (cid and comment_author and comment_ts):
+            continue
+        yield _create_time(comment), {**base, "nick": _item_nick(comment), "content": _comment_content(comment)}
         replies = comment.get("replies") or comment.get("reply_list") or comment.get("replyList")
         if not isinstance(replies, list):
             continue
@@ -242,18 +285,43 @@ def _newest_target(ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 continue
             rid = str(reply.get("reply_id") or reply.get("replyId") or "").strip()
             reply_author = _item_author_id(reply)
-            rts = _create_time(reply)
-            if cid and comment_author and comment_ts and rid and reply_author and rts >= best_ts:
-                best_ts = rts
-                best = {
-                    **base,
-                    "target_reply_id": rid,
-                    "target_user_id": reply_author,
-                    "target_user_nick": _item_nick(reply),
-                    "nick": _item_nick(reply),
-                    "content": _comment_content(reply),
-                }
+            if not (rid and reply_author):
+                continue
+            yield _create_time(reply), {
+                **base,
+                "target_reply_id": rid,
+                "target_user_id": reply_author,
+                "target_user_nick": _item_nick(reply),
+                "nick": _item_nick(reply),
+                "content": _comment_content(reply),
+            }
+
+
+def _newest_target(ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """在评论及其回复中找最新一条，作为「评论回复」的目标。"""
+    best: Optional[Dict[str, Any]] = None
+    best_ts = -1
+    for ts, target in _iter_targets(ctx):
+        if ts >= best_ts:
+            best_ts = ts
+            best = target
     return best
+
+
+def _target_from_item(item: Dict[str, Any], ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """按通知里的 reply_id/comment_id 精确定位到对应那条评论/回复，
+    避免多条新通知都显示成最新一条；定位不到时退回最新一条。"""
+    reply_id = str(item.get("reply_id") or item.get("replyId") or item.get("target_reply_id") or "").strip()
+    comment_id = str(item.get("comment_id") or item.get("commentId") or "").strip()
+    if reply_id:
+        for _, target in _iter_targets(ctx):
+            if target.get("target_reply_id") == reply_id:
+                return target
+    if comment_id:
+        candidates = [t for _, t in _iter_targets(ctx) if t.get("comment_id") == comment_id and not t.get("target_reply_id")]
+        if candidates:
+            return candidates[-1]
+    return _newest_target(ctx)
 
 
 # ==================== 评论列表图片渲染 ====================
@@ -365,32 +433,87 @@ def _comments_as_text(ctx: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# ==================== 昵称补查 ====================
+
+_NICK_CACHE: Dict[Tuple[str, str], str] = {}
+
+
+def _lookup_nick(user: str, guild_id: str, tiny_id: str) -> str:
+    """评论接口不带昵称时用 get-user-info 按 tiny_id 补查（按槽位缓存）。"""
+    if not tiny_id:
+        return ""
+    key = (user, tiny_id)
+    if key in _NICK_CACHE:
+        return _NICK_CACHE[key]
+    args = ["manage", "get-user-info", "--tiny-id", tiny_id, "--json"]
+    if guild_id:
+        args[2:2] = ["--guild-id", guild_id]
+    ok, output = _run_cli(args, user=user or None)
+    nick = ""
+    if ok:
+        payload = _payload_of(output)
+        nick = _item_nick(payload)
+        if not nick and isinstance(payload.get("member"), dict):
+            nick = _item_nick(payload["member"])
+    _NICK_CACHE[key] = nick
+    if len(_NICK_CACHE) > 500:
+        _NICK_CACHE.pop(next(iter(_NICK_CACHE)), None)
+    return nick
+
+
+def _fill_missing_nicks(ctx: Dict[str, Any], user: str, limit: int = 10) -> None:
+    """给评论列表里缺昵称的作者补查昵称（写入 author_nick 供渲染使用）。"""
+    guild_id = str(ctx.get("guild_id") or "")
+    done = 0
+    for comment in ctx["comments"]:
+        entries = [comment]
+        replies = comment.get("replies") or comment.get("reply_list") or comment.get("replyList")
+        if isinstance(replies, list):
+            entries += [r for r in replies if isinstance(r, dict)]
+        for entry in entries:
+            if _item_nick(entry):
+                continue
+            if done >= limit:
+                return
+            done += 1
+            nick = _lookup_nick(user, guild_id, _item_author_id(entry))
+            if nick:
+                entry["author_nick"] = nick
+
+
 # ==================== 通知发送 ====================
 
-async def _notify_admins(user: str, item: Dict[str, Any], ctx: Dict[str, Any], target: Optional[Dict[str, Any]]) -> None:
+async def _dm_admins(text: str, image: Optional[bytes] = None, fallback_text: str = "") -> None:
+    """逐个私聊管理员；管理员 5 分钟内发过消息时关联其 msg_id 变被动回复，
+    即时送达；否则走主动推送（QQ 可能延迟到对方下次上线/发言才展示）。"""
     sender = _get_sender()
     if not sender:
         return
+    for admin in _load_admins():
+        try:
+            msg_id = _passive_msg_id(admin)
+            await sender.send_to_user(admin, text, msg_id=msg_id)
+            if image:
+                await sender.send_image("user", admin, image, "")
+            elif fallback_text:
+                await sender.send_to_user(admin, fallback_text, msg_id=_passive_msg_id(admin))
+        except Exception:
+            pass
+
+
+async def _notify_admins(user: str, item: Dict[str, Any], ctx: Dict[str, Any], target: Optional[Dict[str, Any]], seq: int, with_image: bool = True) -> None:
     who = (target or {}).get("nick") or "有人"
     what = (target or {}).get("content") or _notice_text(item)
     lines = [
-        "💬 频道评论提醒" + (f"｜账号：{user}" if user else ""),
+        f"💬 频道评论提醒 #{seq}" + (f"｜账号：{user}" if user else ""),
         f"帖子：{ctx.get('title') or ctx.get('feed_id')}",
         f"{who}：{str(what)[:NOTIFY_TEXT_LIMIT]}",
     ]
     if target:
-        lines.append("直接发送「评论回复 内容」即可回复TA")
-    text = "\n".join(lines)
-    image = await asyncio.to_thread(render_comments_image, ctx)
-    for admin in _load_admins():
-        try:
-            await sender.send_to_user(admin, text)
-            if image:
-                await sender.send_image("user", admin, image, "")
-            elif ctx["comments"]:
-                await sender.send_to_user(admin, _comments_as_text(ctx))
-        except Exception:
-            pass
+        lines.append(f"发送「评论回复 {seq} 内容」回复TA（不带编号默认回最新一条）")
+    image = await asyncio.to_thread(render_comments_image, ctx) if with_image else None
+    fallback = _comments_as_text(ctx) if (with_image and not image and ctx["comments"]) else ""
+    await _dm_admins("\n".join(lines), image, fallback)
 
 
 # ==================== 轮询 ====================
@@ -401,6 +524,8 @@ async def _poll_slot(user: str) -> None:
         return
     items = _notice_items(_payload_of(output))
     if not items:
+        if not _seen_file(user).exists():
+            _save_seen(user, [])
         return
     seen = _load_seen(user)
     first_run = not seen and not _seen_file(user).exists()
@@ -417,6 +542,7 @@ async def _poll_slot(user: str) -> None:
     if first_run:
         # 首次启动只登记历史通知，不补发提醒
         return
+    imaged_feeds: set = set()
     for _, item in fresh:
         if not _is_comment_notice(item):
             continue
@@ -424,11 +550,85 @@ async def _poll_slot(user: str) -> None:
         if not feed_id:
             continue
         ctx = await asyncio.to_thread(_fetch_feed_context, feed_id, guild_id, user)
-        target = _newest_target(ctx)
-        if target:
-            _LAST_CTX.clear()
-            _LAST_CTX.update({**target, "user": user})
-        await _notify_admins(user, item, ctx, target)
+        await asyncio.to_thread(_fill_missing_nicks, ctx, user)
+        target = _target_from_item(item, ctx)
+        if target and not target.get("nick"):
+            author = target.get("target_user_id") or target.get("comment_author_id") or ""
+            target["nick"] = await asyncio.to_thread(_lookup_nick, user, str(ctx.get("guild_id") or ""), str(author))
+        seq = _push_ctx({**(target or {"feed_id": feed_id}), "kind": "comment", "user": user})
+        # 同一帖子在一轮轮询里只发一次评论列表图片，避免重复
+        await _notify_admins(user, item, ctx, target, seq, with_image=feed_id not in imaged_feeds)
+        imaged_feeds.add(feed_id)
+
+
+# ==================== 频道私信提醒 ====================
+
+def _seed_subscription(user: str) -> None:
+    """check-notices 需要本地订阅标记；直接写槽位自己的订阅状态文件，
+    无需 CLI 的 OpenClaw 推送通道。"""
+    base = _user_home(user) if user else Path.home()
+    path = base / ".qqcli" / "subscription" / "state.json"
+    if path.exists():
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"active": True, "subscribed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _is_dm_notice(item: Dict[str, Any]) -> bool:
+    kind = str(item.get("type") or item.get("notice_type") or item.get("noticeType") or "").lower()
+    if "dm" in kind or "private" in kind:
+        return True
+    return "私信" in _notice_text(item) or bool(item.get("peer_tiny_id") or item.get("peerTinyId"))
+
+
+def _dm_fields(item: Dict[str, Any]) -> Dict[str, str]:
+    peer = str(item.get("peer_tiny_id") or item.get("peerTinyId") or item.get("tiny_id") or item.get("poster_tiny_id") or item.get("sender_tiny_id") or "").strip()
+    guild = str(item.get("source_guild_id") or item.get("sourceGuildId") or item.get("guild_id") or item.get("guildId") or "").strip()
+    return {"peer_tiny_id": peer, "source_guild_id": guild}
+
+
+async def _poll_dm_slot(user: str) -> None:
+    _seed_subscription(user)
+    ok, output = await asyncio.to_thread(_run_cli, ["manage", "check-notices", "--json"], None, user or None)
+    if not ok:
+        return
+    payload = _payload_of(output)
+    items = _notice_items(payload)
+    seen_path = (_user_home(user) if user else BASE_DIR) / "dm_notify_seen.json"
+    if not items:
+        if not seen_path.exists():
+            _write_json_file(seen_path, {"seen": []})
+        return
+    data = _read_json_file(seen_path, {})
+    seen = [str(x) for x in data.get("seen", [])] if isinstance(data.get("seen"), list) else []
+    first_run = not seen and not seen_path.exists()
+    seen_set = set(seen)
+    fresh = [(k, item) for item in items if (k := _notice_key(item)) not in seen_set]
+    if not fresh:
+        return
+    seen.extend(k for k, _ in fresh)
+    _write_json_file(seen_path, {"seen": seen[-SEEN_MAX:]})
+    if first_run:
+        return
+    for _, item in fresh:
+        if not _is_dm_notice(item):
+            continue
+        fields = _dm_fields(item)
+        nick = _item_nick(item)
+        if not nick and fields["peer_tiny_id"]:
+            nick = await asyncio.to_thread(_lookup_nick, user, fields["source_guild_id"], fields["peer_tiny_id"])
+        content = _notice_text(item) or "-"
+        seq = _push_ctx({"kind": "dm", "user": user, "nick": nick, **fields})
+        lines = [
+            f"✉️ 频道私信提醒 #{seq}" + (f"｜账号：{user}" if user else ""),
+            f"{nick or '对方'}：{content[:NOTIFY_TEXT_LIMIT]}",
+        ]
+        if fields["peer_tiny_id"] and fields["source_guild_id"]:
+            lines.append(f"发送「私信回复 {seq} 内容」回复TA（不带编号默认回最新一条）")
+        await _dm_admins("\n".join(lines))
 
 
 async def _poll_loop() -> None:
@@ -442,6 +642,10 @@ async def _poll_loop() -> None:
                 await _poll_slot(user)
             except Exception:
                 pass
+            try:
+                await _poll_dm_slot(user)
+            except Exception:
+                pass
 
 
 # ==================== 指令 ====================
@@ -453,17 +657,35 @@ async def handle_notify_toggle(event, match):
     await event.reply(f"✅ 评论提醒已{'开启' if enabled else '关闭'}（每 {POLL_INTERVAL} 秒轮询各账号槽位的互动消息）")
 
 
+def _parse_numbered(event) -> Tuple[Optional[int], str]:
+    """解析「xx回复 [编号] 内容」，返回 (编号或None, 内容)。"""
+    parts = _text(event).split(None, 1)
+    rest = parts[1].strip() if len(parts) >= 2 else ""
+    seq: Optional[int] = None
+    sub = rest.split(None, 1)
+    if sub and sub[0].isdigit():
+        seq = int(sub[0])
+        rest = sub[1].strip() if len(sub) >= 2 else ""
+    return seq, rest
+
+
 @admin_handler(r"^评论回复\s+.+$", ignore_at_check=True)
 async def handle_quick_reply(event, match):
-    if not _LAST_CTX:
-        await event.reply("暂无可回复的评论提醒（收到新的评论提醒后再试）")
-        return
-    parts = _text(event).split(None, 1)
-    content = parts[1].strip() if len(parts) >= 2 else ""
+    seq, content = _parse_numbered(event)
+    if seq is not None:
+        found = _CTXS.get(seq)
+        if not found or found.get("kind") != "comment":
+            await event.reply(f"没有找到评论提醒 #{seq}（编号见提醒消息标题）")
+            return
+    else:
+        found = _latest_ctx("comment")
+        if not found:
+            await event.reply("暂无可回复的评论提醒（收到新的评论提醒后再试）")
+            return
     if not content:
-        await event.reply("格式：评论回复 内容")
+        await event.reply("格式：评论回复 [编号] 内容")
         return
-    ctx = dict(_LAST_CTX)
+    ctx = dict(found)
     user = str(ctx.get("user") or "")
     replier_id = _get_self_user_id(ctx.get("guild_id") or None, user or None)
     if not replier_id:
@@ -492,6 +714,42 @@ async def handle_quick_reply(event, match):
         await event.reply(f"✅ 已回复 {nick}：{content[:60]}")
     else:
         await event.reply(f"❌ 回复失败：{str(output)[:200]}")
+
+
+@admin_handler(r"^私信回复\s+.+$", ignore_at_check=True)
+async def handle_dm_reply(event, match):
+    seq, content = _parse_numbered(event)
+    if seq is not None:
+        found = _CTXS.get(seq)
+        if not found or found.get("kind") != "dm":
+            await event.reply(f"没有找到私信提醒 #{seq}（编号见提醒消息标题）")
+            return
+    else:
+        found = _latest_ctx("dm")
+        if not found:
+            await event.reply("暂无可回复的私信提醒（收到新的私信提醒后再试）")
+            return
+    if not content:
+        await event.reply("格式：私信回复 [编号] 内容")
+        return
+    if not (found.get("peer_tiny_id") and found.get("source_guild_id")):
+        await event.reply("这条私信提醒缺少对方信息，无法直接回复")
+        return
+    user = str(found.get("user") or "")
+    args = [
+        "manage", "push-group-dm-msg",
+        "--peer-tiny-id", found["peer_tiny_id"],
+        "--source-guild-id", found["source_guild_id"],
+        "--text", content,
+        "--json",
+    ]
+    ok, output = await asyncio.to_thread(_run_cli, args, None, user or None)
+    output = _normalize_rate_limit(output)
+    nick = found.get("nick") or "对方"
+    if ok:
+        await event.reply(f"✅ 已私信回复 {nick}：{content[:60]}")
+    else:
+        await event.reply(f"❌ 私信回复失败：{str(output)[:200]}")
 
 
 # ==================== 生命周期 ====================
