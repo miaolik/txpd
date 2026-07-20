@@ -142,6 +142,40 @@ def _comment_content(item: Dict[str, Any]) -> str:
     return content or "-"
 
 
+_NICK_KEYS = ("author_nick", "poster_nick", "nick", "nickname", "nick_name", "user_nick")
+_AUTHOR_ID_KEYS = ("author_id", "poster_id", "comment_author_id", "reply_author_id", "authorId", "user_id", "tinyid", "poster_tiny_id")
+
+
+def _item_nick(item: Dict[str, Any]) -> str:
+    for key in _NICK_KEYS:
+        value = str(item.get(key) or "").strip()
+        if value:
+            return value
+    for sub_key in ("poster", "author", "user", "user_info", "poster_info"):
+        sub = item.get(sub_key)
+        if isinstance(sub, dict):
+            for key in _NICK_KEYS:
+                value = str(sub.get(key) or "").strip()
+                if value:
+                    return value
+    return ""
+
+
+def _item_author_id(item: Dict[str, Any]) -> str:
+    for key in _AUTHOR_ID_KEYS:
+        value = str(item.get(key) or "").strip()
+        if value:
+            return value
+    for sub_key in ("poster", "author", "user", "user_info", "poster_info"):
+        sub = item.get(sub_key)
+        if isinstance(sub, dict):
+            for key in ("id",) + _AUTHOR_ID_KEYS:
+                value = str(sub.get(key) or "").strip()
+                if value:
+                    return value
+    return ""
+
+
 def _create_time(item: Dict[str, Any]) -> int:
     for key in ("create_time_raw", "comment_create_time", "reply_create_time", "create_time", "createTime"):
         raw = str(item.get(key) or "").strip()
@@ -165,7 +199,8 @@ def _fetch_feed_context(feed_id: str, guild_id: str, user: str) -> Dict[str, Any
             ctx["feed_author_id"] = str(feed_obj.get("author_id") or feed_obj.get("authorId") or feed_obj.get("feed_author_id") or "").strip()
             ctx["feed_create_time"] = str(feed_obj.get("create_time_raw") or feed_obj.get("feed_create_time") or feed_obj.get("create_time") or feed_obj.get("createTime") or "").strip()
             ctx["channel_id"] = str(feed_obj.get("channel_id") or feed_obj.get("channelId") or "").strip()
-    args = ["feed", "get-feed-comments", "--feed-id", feed_id]
+    # --reply-list-num 预加载楼中楼回复（默认只带 1 条，最大 10）
+    args = ["feed", "get-feed-comments", "--feed-id", feed_id, "--reply-list-num", "10"]
     if guild_id:
         args += ["--guild-id", guild_id]
     args += ["--json"]
@@ -184,7 +219,7 @@ def _newest_target(ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     best_ts = -1
     for comment in ctx["comments"]:
         cid = str(comment.get("comment_id") or comment.get("commentId") or "").strip()
-        comment_author = str(comment.get("author_id") or comment.get("comment_author_id") or comment.get("authorId") or "").strip()
+        comment_author = _item_author_id(comment)
         comment_ts = str(comment.get("comment_create_time") or comment.get("create_time_raw") or comment.get("create_time") or comment.get("createTime") or "").strip()
         base = {
             "feed_id": ctx["feed_id"],
@@ -198,7 +233,7 @@ def _newest_target(ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         ts = _create_time(comment)
         if cid and comment_author and comment_ts and ts >= best_ts:
             best_ts = ts
-            best = {**base, "nick": str(comment.get("author_nick") or comment.get("nick") or comment.get("nickname") or "").strip(), "content": _comment_content(comment)}
+            best = {**base, "nick": _item_nick(comment), "content": _comment_content(comment)}
         replies = comment.get("replies") or comment.get("reply_list") or comment.get("replyList")
         if not isinstance(replies, list):
             continue
@@ -206,7 +241,7 @@ def _newest_target(ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             if not isinstance(reply, dict):
                 continue
             rid = str(reply.get("reply_id") or reply.get("replyId") or "").strip()
-            reply_author = str(reply.get("author_id") or reply.get("reply_author_id") or reply.get("authorId") or "").strip()
+            reply_author = _item_author_id(reply)
             rts = _create_time(reply)
             if cid and comment_author and comment_ts and rid and reply_author and rts >= best_ts:
                 best_ts = rts
@@ -214,8 +249,8 @@ def _newest_target(ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                     **base,
                     "target_reply_id": rid,
                     "target_user_id": reply_author,
-                    "target_user_nick": str(reply.get("author_nick") or reply.get("nick") or reply.get("nickname") or "").strip(),
-                    "nick": str(reply.get("author_nick") or reply.get("nick") or reply.get("nickname") or "").strip(),
+                    "target_user_nick": _item_nick(reply),
+                    "nick": _item_nick(reply),
                     "content": _comment_content(reply),
                 }
     return best
@@ -287,7 +322,7 @@ def render_comments_image(ctx: Dict[str, Any]) -> Optional[bytes]:
     rows.append((f"共 {len(ctx['comments'])} 条评论", font_small, "#888888"))
     rows.append(("", font_small, "#888888"))
     for comment in ctx["comments"]:
-        nick = str(comment.get("author_nick") or comment.get("nick") or comment.get("nickname") or "未知用户").strip()
+        nick = _item_nick(comment) or "未知用户"
         rows.append((f"● {nick}", font, "#2b5aa0"))
         for line in _wrap_text(_comment_content(comment), 52):
             rows.append((f"   {line}", font, "#1a1a1a"))
@@ -296,7 +331,7 @@ def render_comments_image(ctx: Dict[str, Any]) -> Optional[bytes]:
             for reply in replies:
                 if not isinstance(reply, dict):
                     continue
-                reply_nick = str(reply.get("author_nick") or reply.get("nick") or reply.get("nickname") or "未知用户").strip()
+                reply_nick = _item_nick(reply) or "未知用户"
                 rows.append((f"    ↳ {reply_nick}", font_small, "#4a7a4a"))
                 for line in _wrap_text(_comment_content(reply), 54):
                     rows.append((f"       {line}", font_small, "#333333"))
@@ -318,14 +353,14 @@ def render_comments_image(ctx: Dict[str, Any]) -> Optional[bytes]:
 def _comments_as_text(ctx: Dict[str, Any]) -> str:
     lines = [f"📋 评论列表（共 {len(ctx['comments'])} 条）"]
     for comment in ctx["comments"][:20]:
-        nick = str(comment.get("author_nick") or comment.get("nick") or comment.get("nickname") or "未知用户").strip()
+        nick = _item_nick(comment) or "未知用户"
         lines.append(f"● {nick}：{_comment_content(comment)[:NOTIFY_TEXT_LIMIT]}")
         replies = comment.get("replies") or comment.get("reply_list") or comment.get("replyList")
         if isinstance(replies, list):
             for reply in replies[:5]:
                 if not isinstance(reply, dict):
                     continue
-                reply_nick = str(reply.get("author_nick") or reply.get("nick") or reply.get("nickname") or "未知用户").strip()
+                reply_nick = _item_nick(reply) or "未知用户"
                 lines.append(f"　↳ {reply_nick}：{_comment_content(reply)[:NOTIFY_TEXT_LIMIT]}")
     return "\n".join(lines)
 
