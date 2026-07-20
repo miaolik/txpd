@@ -1427,13 +1427,24 @@ async def handle_login(event, match):
     qr = str(payload.get("qrcode_path") or "").strip()
     expires = payload.get("expires_in_s")
     if ok and uri:
-        lines = [f"🔑 频道扫码登录（当前槽位：{current}）", "如需登录其他号，先发「频道添加账号 名称」和「频道切换账号 名称」", f"授权链接：<{uri}>"]
-        if qr:
-            lines.append(f"二维码图片：{qr}")
+        lines = [
+            f"🔑 频道扫码登录（当前槽位：{current}）",
+            "如需登录其他号，先发「频道添加账号 名称」和「频道切换账号 名称」",
+            f"👉 [点击此处打开授权页面]({uri})",
+        ]
         if expires:
             lines.append(f"有效期：{expires} 秒")
         lines.append("扫码或打开链接授权后，发送「频道登录确认」完成登录")
-        await event.reply("\n".join(lines))
+        await event.reply("\n".join(lines), msg_type=2)
+        qr_sent = False
+        if qr:
+            try:
+                qr_bytes = Path(qr).read_bytes()
+                qr_sent = bool(await event.reply_image(qr_bytes, "📱 扫描二维码授权"))
+            except Exception:
+                qr_sent = False
+        if qr and not qr_sent:
+            await event.reply(f"二维码图片发送失败，可打开上方授权链接完成授权（二维码文件：{qr}）")
         return
     await event.reply(_render_result("频道登录", ok, _normalize_rate_limit(output), ["login", "--json"]))
 
