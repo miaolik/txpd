@@ -10,6 +10,6 @@ from . import web_panel  # noqa: F401
 __plugin_meta__ = {
     "name": "腾讯频道",
     "description": "腾讯频道管理：指令 + Web 管理面板 + 定时发帖（Cron），仅限插件管理员使用",
-    "version": "2.0.0",
+    "version": "3.0.0",
     "author": "miaolik",
 }
