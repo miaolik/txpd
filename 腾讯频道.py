@@ -3,8 +3,10 @@
 
 import functools
 import json
+import os
 import re
 import subprocess
+import sys
 import time
 import urllib.parse
 import uuid
@@ -18,13 +20,51 @@ from core.plugin.decorators import handler
 
 
 BASE_DIR = Path(__file__).resolve().parent
+IS_WINDOWS = sys.platform.startswith("win")
+LOCAL_NPM_DIR = BASE_DIR / ".cli" / "node_modules"
+LOCAL_CLI_BINS = (
+    LOCAL_NPM_DIR / ".bin" / "tencent-channel-cli",
+    LOCAL_NPM_DIR / "tencent-channel-cli-linux-x64" / "bin" / "tencent-channel-cli",
+    LOCAL_NPM_DIR / "tencent-channel-cli-linux-arm64" / "bin" / "tencent-channel-cli",
+    LOCAL_NPM_DIR / "tencent-channel-cli" / "bin" / "tencent-channel-cli",
+)
+
+
+def _ensure_executable(path: Path) -> None:
+    try:
+        if not os.access(path, os.X_OK):
+            path.chmod(path.stat().st_mode | 0o755)
+    except Exception:
+        pass
+
+
 def _resolve_cli() -> Optional[str]:
-    """CLI 查找顺序：插件目录内置 exe/cmd → PATH（npm install -g tencent-channel-cli）。"""
-    for name in ("tencent-channel-cli.exe", "tencent-channel-cli.cmd", "tencent-channel-cli"):
+    """CLI 查找顺序：插件目录内置二进制（Windows: exe/cmd；Linux/macOS: linux-x64 等）
+    → 插件目录本地 npm 安装（.cli）→ PATH（npm install -g tencent-channel-cli）。"""
+    if IS_WINDOWS:
+        local_names = ("tencent-channel-cli.exe", "tencent-channel-cli.cmd", "tencent-channel-cli")
+        path_names = ("tencent-channel-cli", "tencent-channel-cli.cmd")
+    else:
+        local_names = (
+            "tencent-channel-cli-linux-x64",
+            "tencent-channel-cli-linux-arm64",
+            "tencent-channel-cli-macos-x64",
+            "tencent-channel-cli-macos-arm64",
+            "tencent-channel-cli",
+        )
+        path_names = ("tencent-channel-cli",)
+    for name in local_names:
         p = BASE_DIR / name
-        if p.exists():
+        if p.is_file():
+            if not IS_WINDOWS:
+                _ensure_executable(p)
             return str(p)
-    for name in ("tencent-channel-cli", "tencent-channel-cli.cmd"):
+    if not IS_WINDOWS:
+        for p in LOCAL_CLI_BINS:
+            if p.is_file():
+                _ensure_executable(p)
+                return str(p)
+    for name in path_names:
         found = shutil.which(name)
         if found and not found.lower().endswith(".ps1"):
             return found
@@ -1641,7 +1681,11 @@ def _quick_cmd(text: str, show: Optional[str] = None, reference: Optional[bool] 
 def _run_cli(args: List[str], stdin_text: Optional[str] = None) -> Tuple[bool, str]:
     cli = _resolve_cli()
     if not cli:
-        return False, "未找到 tencent-channel-cli，请将 CLI 放入插件目录或执行 npm install -g tencent-channel-cli"
+        return False, (
+            "未找到 tencent-channel-cli，请将 CLI 放入插件目录"
+            + ("" if IS_WINDOWS else "（如 tencent-channel-cli-linux-x64 二进制）")
+            + "或安装 Node.js/npm 后执行 npm install -g tencent-channel-cli"
+        )
     try:
         proc = subprocess.run(
             [cli, *args],
