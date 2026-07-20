@@ -6,3 +6,6 @@ feed_schedules.json
 .cli/
 .home/
 .qqcli/
+users/
+users.json
+post_history.json

@@ -19,9 +19,14 @@ from .腾讯频道 import (
     _extract_json,
     _get_self_user_id,
     _load_admins,
+    _load_users,
     _normalize_rate_limit,
     _run_cli,
     _save_admins,
+    add_user,
+    remove_user,
+    set_user_nickname,
+    switch_user,
 )
 
 PAGE_KEY = "txpd-panel"
@@ -48,6 +53,9 @@ ACTIONS: Dict[str, Dict[str, Any]] = {
     "replies": {"base": ["feed", "get-next-page-replies"], "required": {"feed_id": "--feed-id", "comment_id": "--comment-id"}, "optional": {"guild_id": "--guild-id", "channel_id": "--channel-id", "attach_info": "--attach-info"}},
     "notices": {"base": ["feed", "get-notices"], "optional": {"attach_info": "--attach-info"}},
     "login-status": {"base": ["login", "status"]},
+    "login": {"base": ["login"]},
+    "login-poll": {"base": ["login", "poll-token"]},
+    "logout": {"base": ["login", "logout"]},
     # ── 频道管理 ──
     "join-guild": {"base": ["manage", "join-guild"], "required": {"guild_id": "--guild-id"}},
     "leave-guild": {"base": ["manage", "leave-guild"], "required": {"guild_id": "--guild-id"}, "yes": True},
@@ -73,7 +81,7 @@ ACTIONS: Dict[str, Dict[str, Any]] = {
 }
 
 
-def _build_action_args(action: str, params: Dict[str, Any]) -> Any:
+def _build_action_args(action: str, params: Dict[str, Any], user: str = "") -> Any:
     spec = ACTIONS.get(action)
     if not spec:
         return {"error": f"未知操作: {action}"}
@@ -89,7 +97,7 @@ def _build_action_args(action: str, params: Dict[str, Any]) -> Any:
         if value:
             args += [flag, value]
     if spec.get("replier"):
-        replier_id = str(params.get("replier_id") or "").strip() or _get_self_user_id(str(params.get("guild_id") or "").strip() or None) or _get_self_user_id()
+        replier_id = str(params.get("replier_id") or "").strip() or _get_self_user_id(str(params.get("guild_id") or "").strip() or None, user or None) or _get_self_user_id(None, user or None)
         if not replier_id:
             return {"error": "无法获取自己的用户ID，请先在面板执行一次「用户资料」"}
         args += ["--replier-id", replier_id]
@@ -99,8 +107,8 @@ def _build_action_args(action: str, params: Dict[str, Any]) -> Any:
     return {"args": args}
 
 
-async def _run_cli_json(args: List[str]) -> Dict[str, Any]:
-    ok, output = await asyncio.to_thread(_run_cli, args)
+async def _run_cli_json(args: List[str], user: str = "") -> Dict[str, Any]:
+    ok, output = await asyncio.to_thread(_run_cli, args, None, user or None)
     output = _normalize_rate_limit(output)
     data = _extract_json(output)
     result: Dict[str, Any] = {"success": ok}
@@ -126,10 +134,60 @@ async def api_cli(request: web.Request):
     body = await _json_body(request)
     action = str(body.get("action") or "").strip()
     params = body.get("params") if isinstance(body.get("params"), dict) else {}
-    built = _build_action_args(action, params)
+    user = str(body.get("user") or "").strip()
+    built = _build_action_args(action, params, user)
     if "error" in built:
         return web.json_response({"success": False, "message": built["error"]})
-    return web.json_response(await _run_cli_json(built["args"]))
+    return web.json_response(await _run_cli_json(built["args"], user))
+
+
+# ==================== 账号槽位 ====================
+
+@register_route("GET", "/api/ext/txpd/users")
+async def api_get_users(request: web.Request):
+    data = _load_users()
+    return web.json_response({"success": True, "data": data})
+
+
+@register_route("POST", "/api/ext/txpd/users")
+async def api_manage_users(request: web.Request):
+    body = await _json_body(request)
+    op = str(body.get("op") or "").strip()
+    name = str(body.get("name") or "").strip()
+    if op == "add":
+        ok, msg = add_user(name)
+    elif op == "delete":
+        ok, msg = remove_user(name)
+    elif op == "switch":
+        ok, msg = switch_user(name)
+    else:
+        ok, msg = False, "未知操作"
+    return web.json_response({"success": ok, "message": msg, "data": _load_users()})
+
+
+@register_route("POST", "/api/ext/txpd/users/status")
+async def api_user_status(request: web.Request):
+    """查询指定槽位的登录状态与昵称（昵称成功时顺带缓存）。"""
+    body = await _json_body(request)
+    name = str(body.get("name") or "").strip()
+    if not name or name not in _load_users()["users"]:
+        return web.json_response({"success": False, "message": f"槽位「{name}」不存在"})
+    status = await _run_cli_json(["login", "status", "--json"], name)
+    nickname = ""
+    info = await _run_cli_json(["manage", "get-user-info", "--json"], name)
+    payload = info.get("data") if isinstance(info.get("data"), dict) else {}
+    if isinstance(payload.get("data"), dict):
+        payload = payload["data"]
+    if isinstance(payload, dict):
+        nickname = str(payload.get("nickname") or payload.get("nick") or "").strip()
+    if nickname:
+        set_user_nickname(name, nickname)
+    return web.json_response({"success": True, "data": {"name": name, "status": status, "nickname": nickname}})
+
+
+@register_route("GET", "/api/ext/txpd/history")
+async def api_get_history(request: web.Request):
+    return web.json_response({"success": True, "data": {"history": feed_scheduler.load_history()}})
 
 
 @register_route("GET", "/api/ext/txpd/admins")
@@ -177,6 +235,7 @@ async def api_save_schedule(request: web.Request):
         schedules.append(normalized)
     if not feed_scheduler.save_schedules(schedules):
         return web.json_response({"success": False, "message": "保存失败"})
+    feed_scheduler.record_history({**normalized, "kind": "schedule"})
     return web.json_response({"success": True, "message": "保存成功", "data": {"schedule": normalized}})
 
 
@@ -226,6 +285,7 @@ async def api_publish_feed(request: web.Request):
     normalized = feed_scheduler.normalize_schedule({**body, "cron": "* * * * *"})
     if "error" in normalized:
         return web.json_response({"success": False, "message": normalized["error"]})
+    feed_scheduler.record_history({**normalized, "kind": "publish"})
     result = await asyncio.to_thread(feed_scheduler.run_schedule_sync, normalized)
     return web.json_response({"success": result["ok"], "message": result["message"]})
 
