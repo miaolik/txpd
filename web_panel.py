@@ -14,6 +14,7 @@ from core.plugin.decorators import on_load, on_unload
 from core.plugin.web_pages import register_page, register_route, unregister_page
 
 from . import feed_scheduler
+from .评论通知 import DM_MERGE_WINDOW_MAX, dm_merge_window
 from .腾讯频道 import (
     BASE_DIR,
     _extract_json,
@@ -23,6 +24,7 @@ from .腾讯频道 import (
     _normalize_rate_limit,
     _run_cli,
     _save_admins,
+    _set_setting,
     add_user,
     remove_user,
     set_user_nickname,
@@ -210,6 +212,24 @@ async def api_save_admins(request: web.Request):
     if not _save_admins(admins):
         return web.json_response({"success": False, "message": "保存失败"})
     return web.json_response({"success": True, "message": f"已保存 {len(admins)} 个管理员", "data": {"admins": _load_admins()}})
+
+
+@register_route("GET", "/api/ext/txpd/notify-settings")
+async def api_get_notify_settings(request: web.Request):
+    return web.json_response({"success": True, "data": {"dm_merge_window": dm_merge_window(), "max": DM_MERGE_WINDOW_MAX}})
+
+
+@register_route("POST", "/api/ext/txpd/notify-settings")
+async def api_save_notify_settings(request: web.Request):
+    body = await _json_body(request)
+    try:
+        value = int(body.get("dm_merge_window"))
+    except (TypeError, ValueError):
+        return web.json_response({"success": False, "message": "冷却时间需为整数秒数"})
+    if value < 0 or value > DM_MERGE_WINDOW_MAX:
+        return web.json_response({"success": False, "message": f"冷却时间需在 0-{DM_MERGE_WINDOW_MAX} 秒之间"})
+    _set_setting("dm_merge_window", value)
+    return web.json_response({"success": True, "message": f"私信合并冷却已设为 {value} 秒", "data": {"dm_merge_window": dm_merge_window()}})
 
 
 @register_route("GET", "/api/ext/txpd/schedules")

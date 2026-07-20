@@ -1848,6 +1848,16 @@ def _get_switch(key: str, default: bool) -> bool:
     return bool(data.get(key, default))
 
 
+def _get_setting(key: str, default: Any = None) -> Any:
+    return _read_plugin_settings().get(key, default)
+
+
+def _set_setting(key: str, value: Any) -> None:
+    data = _read_plugin_settings()
+    data[key] = value
+    _write_json_file(PLUGIN_SETTINGS, data)
+
+
 def _preview_enabled() -> bool:
     return _get_switch("preview_enabled", True)
 

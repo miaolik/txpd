@@ -10,7 +10,8 @@
 3. 管理员发送「评论回复 内容」即可直接回复最近一条提醒的评论/回复
    （自动用对应账号槽位的身份调用 feed do-reply）。
 
-指令：评论通知 开启/关闭（默认开启）。
+指令：评论通知 开启/关闭（默认开启）；私信冷却 秒数（同一人多条私信在
+冷却窗口内合并成一条提醒，默认 10 秒，0 为不合并）。
 """
 
 import asyncio
@@ -26,12 +27,14 @@ from .腾讯频道 import (
     BASE_DIR,
     _extract_json,
     _get_self_user_id,
+    _get_setting,
     _get_switch,
     _load_admins,
     _load_users,
     _normalize_rate_limit,
     _read_json_file,
     _run_cli,
+    _set_setting,
     _set_switch,
     _text,
     _user_home,
@@ -43,6 +46,8 @@ POLL_INTERVAL = 60
 SEEN_MAX = 300
 NOTIFY_TEXT_LIMIT = 120
 CTX_MAX = 50
+DM_MERGE_WINDOW_DEFAULT = 10
+DM_MERGE_WINDOW_MAX = 600
 _TASK_NAME = "txpd_comment_notify"
 
 # 提醒上下文按编号保存（「评论回复 编号 内容」/「私信回复 编号 内容」）
@@ -472,14 +477,14 @@ def _fill_missing_nicks(ctx: Dict[str, Any], user: str, limit: int = 10) -> None
 
 # ==================== 通知发送 ====================
 
-async def _dm_admins(text: str, image: Optional[bytes] = None, fallback_text: str = "") -> None:
+async def _dm_admins(text: str, image: Optional[bytes] = None, fallback_text: str = "", buttons: Optional[List[Any]] = None) -> None:
     """逐个私聊管理员，全部走主动消息推送（不关联 msg_id）。"""
     sender = _get_sender()
     if not sender:
         return
     for admin in _load_admins():
         try:
-            await sender.send_to_user(admin, text)
+            await sender.send_to_user(admin, text, buttons=buttons)
             if image:
                 await sender.send_image("user", admin, image, "")
             elif fallback_text:
@@ -607,6 +612,65 @@ def _dm_notice_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [x for x in _notice_items(payload) if _is_dm_notice(x)]
 
 
+def dm_merge_window() -> int:
+    """同一人私信合并冷却窗口（秒），0 为不合并。"""
+    try:
+        value = int(_get_setting("dm_merge_window", DM_MERGE_WINDOW_DEFAULT))
+    except (TypeError, ValueError):
+        return DM_MERGE_WINDOW_DEFAULT
+    return max(0, min(value, DM_MERGE_WINDOW_MAX))
+
+
+# 待发送的私信提醒，按（账号槽位, 对方）分组缓冲，冷却窗口内合并成一条
+_DM_PENDING: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+
+async def _flush_dm_group(key: Tuple[str, str], delay: float) -> None:
+    if delay > 0:
+        await asyncio.sleep(delay)
+    entry = _DM_PENDING.pop(key, None)
+    if not entry:
+        return
+    user = entry["user"]
+    fields = entry["fields"]
+    nick = entry["nick"]
+    contents: List[str] = entry["contents"]
+    seq = _push_ctx({"kind": "dm", "user": user, "nick": nick, **fields})
+    lines = [f"✉️ 频道私信提醒 #{seq}" + (f"｜账号：{user}" if user else "")]
+    who = nick or "对方"
+    if len(contents) == 1:
+        lines.append(f"{who}：{contents[0][:NOTIFY_TEXT_LIMIT]}")
+    else:
+        lines.append(f"{who}（{len(contents)} 条）：")
+        lines += [f"・{c[:NOTIFY_TEXT_LIMIT]}" for c in contents]
+    buttons = None
+    if fields["ref"] or (fields["peer_tiny_id"] and fields["source_guild_id"]):
+        lines.append(f"发送「私信回复 {seq} 内容」回复TA（不带编号默认回最新一条）")
+        # 指令按钮：点击后把「私信回复 N 」填入输入框，补上内容回车即可
+        buttons = [[{"text": f"私信回复 {seq}", "data": f"私信回复 {seq} ", "type": 2}]]
+    await _dm_admins("\n".join(lines), buttons=buttons)
+
+
+async def _queue_dm_notice(user: str, fields: Dict[str, str], nick: str, content: str) -> None:
+    """同一人在冷却窗口内的多条私信合并成一条提醒。"""
+    window = dm_merge_window()
+    peer = fields["peer_tiny_id"] or fields["ref"] or nick or "unknown"
+    key = (user, peer)
+    entry = _DM_PENDING.get(key)
+    if entry is not None:
+        entry["contents"].append(content)
+        entry["nick"] = entry["nick"] or nick
+        for k, v in fields.items():
+            if v:
+                entry["fields"][k] = v
+        return
+    _DM_PENDING[key] = {"user": user, "fields": dict(fields), "nick": nick, "contents": [content]}
+    if window <= 0:
+        await _flush_dm_group(key, 0)
+    else:
+        asyncio.create_task(_flush_dm_group(key, window))
+
+
 async def _poll_dm_slot(user: str) -> None:
     _seed_subscription(user)
     ok, output = await asyncio.to_thread(_run_cli, ["manage", "check-notices", "--json"], None, user or None)
@@ -631,18 +695,14 @@ async def _poll_dm_slot(user: str) -> None:
         if _is_own_sent_dm(_notice_text(item)):
             continue
         fields = _dm_fields(item)
-        nick = _item_nick(item)
-        if not nick and fields["peer_tiny_id"]:
+        # 通知项自带的昵称字段可能是自己账号的，优先用对方 tiny_id 反查
+        nick = ""
+        if fields["peer_tiny_id"]:
             nick = await asyncio.to_thread(_lookup_nick, user, fields["source_guild_id"], fields["peer_tiny_id"])
+        if not nick:
+            nick = _item_nick(item)
         content = _notice_text(item) or "-"
-        seq = _push_ctx({"kind": "dm", "user": user, "nick": nick, **fields})
-        lines = [
-            f"✉️ 频道私信提醒 #{seq}" + (f"｜账号：{user}" if user else ""),
-            f"{nick or '对方'}：{content[:NOTIFY_TEXT_LIMIT]}",
-        ]
-        if fields["ref"] or (fields["peer_tiny_id"] and fields["source_guild_id"]):
-            lines.append(f"发送「私信回复 {seq} 内容」回复TA（不带编号默认回最新一条）")
-        await _dm_admins("\n".join(lines))
+        await _queue_dm_notice(user, fields, nick, content)
 
 
 async def _poll_loop() -> None:
@@ -669,6 +729,17 @@ async def handle_notify_toggle(event, match):
     enabled = match.group(1) == "开启"
     _set_switch("comment_notify_enabled", enabled)
     await event.reply(f"✅ 评论提醒已{'开启' if enabled else '关闭'}（每 {POLL_INTERVAL} 秒轮询各账号槽位的互动消息）")
+
+
+@admin_handler(r"^私信冷却(\s+\d+)?$", ignore_at_check=True)
+async def handle_dm_merge_window(event, match):
+    raw = (match.group(1) or "").strip()
+    if not raw:
+        await event.reply(f"当前私信合并冷却：{dm_merge_window()} 秒（发送「私信冷却 秒数」修改，0 为不合并，最大 {DM_MERGE_WINDOW_MAX}）")
+        return
+    value = min(int(raw), DM_MERGE_WINDOW_MAX)
+    _set_setting("dm_merge_window", value)
+    await event.reply(f"✅ 私信合并冷却已设为 {value} 秒" + ("（不合并，每条单独提醒）" if value == 0 else f"（同一人 {value} 秒内的私信合并成一条）"))
 
 
 def _parse_numbered(event) -> Tuple[Optional[int], str]:
