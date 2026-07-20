@@ -10,7 +10,7 @@
 3. 管理员发送「评论回复 内容」即可直接回复最近一条提醒的评论/回复
    （自动用对应账号槽位的身份调用 feed do-reply）。
 
-指令：评论通知 开启/关闭、私信通知 开启/关闭（默认均开启）；私信冷却 秒数
+指令：评论通知 开启/关闭、私信通知 开启/关闭（默认均开启）；通知间隔 秒数；私信冷却 秒数
 （同一人多条私信在冷却窗口内合并成一条提醒，默认 10 秒，0 为不合并）。
 """
 
@@ -45,6 +45,8 @@ from .腾讯频道 import (
 )
 
 POLL_INTERVAL = 60
+POLL_INTERVAL_MIN = 15
+POLL_INTERVAL_MAX = 600
 SEEN_MAX = 300
 NOTIFY_TEXT_LIMIT = 120
 CTX_MAX = 50
@@ -79,6 +81,15 @@ def notify_enabled() -> bool:
 
 def dm_notify_enabled() -> bool:
     return _get_switch("dm_notify_enabled", True)
+
+
+def notify_poll_interval() -> int:
+    """通知轮询间隔（秒），越小推送越及时但请求越频繁。"""
+    try:
+        value = int(_get_setting("notify_poll_interval", POLL_INTERVAL))
+    except (TypeError, ValueError):
+        return POLL_INTERVAL
+    return max(POLL_INTERVAL_MIN, min(value, POLL_INTERVAL_MAX))
 
 
 def _get_sender():
@@ -766,6 +777,9 @@ async def _poll_dm_slot(user: str) -> None:
     seen.extend(k for k, _ in fresh)
     _write_json_file(seen_path, {"seen": seen[-SEEN_MAX:]})
     dm_msgs = _parse_dm_msgs(stderr)
+    self_id = ""
+    if dm_msgs:
+        self_id = str(await asyncio.to_thread(_get_self_user_id, None, user or None) or "").strip()
     for _, item in fresh:
         if _is_own_sent_dm(_notice_text(item)):
             continue
@@ -775,6 +789,9 @@ async def _poll_dm_slot(user: str) -> None:
         nick = ""
         msg = _match_dm_msg(dm_msgs, item)
         if msg:
+            # 自己在手机上回复对方的消息也会出现在通知里，按发送人过滤掉
+            if self_id and msg["from_tiny_id"] == self_id:
+                continue
             fields["peer_tiny_id"] = fields["peer_tiny_id"] or msg["from_tiny_id"]
             fields["source_guild_id"] = fields["source_guild_id"] or msg["source_guild_id"]
             fields["dm_guild_id"] = fields["dm_guild_id"] or msg["dm_guild_id"]
@@ -787,7 +804,7 @@ async def _poll_dm_slot(user: str) -> None:
 
 async def _poll_loop() -> None:
     while True:
-        await asyncio.sleep(POLL_INTERVAL)
+        await asyncio.sleep(notify_poll_interval())
         comment_on = notify_enabled()
         dm_on = dm_notify_enabled()
         if not comment_on and not dm_on:
@@ -812,14 +829,25 @@ async def _poll_loop() -> None:
 async def handle_notify_toggle(event, match):
     enabled = match.group(1) == "开启"
     _set_switch("comment_notify_enabled", enabled)
-    await event.reply(f"✅ 评论提醒已{'开启' if enabled else '关闭'}（每 {POLL_INTERVAL} 秒轮询各账号槽位的互动消息）")
+    await event.reply(f"✅ 评论提醒已{'开启' if enabled else '关闭'}（每 {notify_poll_interval()} 秒轮询各账号槽位的互动消息）")
 
 
 @admin_handler(r"^私信通知\s*(开启|关闭)$", ignore_at_check=True)
 async def handle_dm_notify_toggle(event, match):
     enabled = match.group(1) == "开启"
     _set_switch("dm_notify_enabled", enabled)
-    await event.reply(f"✅ 私信提醒已{'开启' if enabled else '关闭'}（每 {POLL_INTERVAL} 秒轮询各账号槽位的私信通知）")
+    await event.reply(f"✅ 私信提醒已{'开启' if enabled else '关闭'}（每 {notify_poll_interval()} 秒轮询各账号槽位的私信通知）")
+
+
+@admin_handler(r"^通知间隔(\s+\d+)?$", ignore_at_check=True)
+async def handle_poll_interval(event, match):
+    raw = (match.group(1) or "").strip()
+    if not raw:
+        await event.reply(f"当前通知轮询间隔：{notify_poll_interval()} 秒（发送「通知间隔 秒数」修改，范围 {POLL_INTERVAL_MIN}-{POLL_INTERVAL_MAX}）")
+        return
+    value = max(POLL_INTERVAL_MIN, min(int(raw), POLL_INTERVAL_MAX))
+    _set_setting("notify_poll_interval", value)
+    await event.reply(f"✅ 通知轮询间隔已设为 {value} 秒（提醒最迟约 间隔+私信冷却 秒后送达）")
 
 
 @admin_handler(r"^私信冷却(\s+\d+)?$", ignore_at_check=True)

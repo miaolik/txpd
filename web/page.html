@@ -232,9 +232,11 @@
     <div class="row" style="margin-top:10px;align-items:center;gap:8px">
       <span>私信合并冷却（秒）</span>
       <input id="dm-merge-window" type="number" min="0" max="600" style="width:100px" placeholder="10">
+      <span>轮询间隔（秒）</span>
+      <input id="notify-poll-interval" type="number" min="15" max="600" style="width:100px" placeholder="60">
       <button class="btn green" onclick="saveNotifySettings()">保存</button>
     </div>
-    <div class="muted">同一人在冷却窗口内发来的多条私信会合并成一条提醒，0 为不合并，最大 600 秒。也可发送指令「评论通知 开启/关闭」「私信通知 开启/关闭」「私信冷却 秒数」修改。</div>
+    <div class="muted">同一人在冷却窗口内发来的多条私信会合并成一条提醒，0 为不合并。轮询间隔越小推送越及时（15-600 秒）。也可发送指令「评论通知 开启/关闭」「私信通知 开启/关闭」「私信冷却 秒数」「通知间隔 秒数」修改。</div>
   </div>
 </div>
 
@@ -968,6 +970,7 @@ async function loadNotifySettings() {
   const r = await api('notify-settings');
   if (r.success && r.data) {
     document.getElementById('dm-merge-window').value = r.data.dm_merge_window;
+    document.getElementById('notify-poll-interval').value = r.data.notify_poll_interval;
     document.getElementById('comment-notify-enabled').checked = !!r.data.comment_notify_enabled;
     document.getElementById('dm-notify-enabled').checked = !!r.data.dm_notify_enabled;
   }
@@ -975,6 +978,7 @@ async function loadNotifySettings() {
 async function saveNotifySettings() {
   const r = await api('notify-settings', {
     dm_merge_window: document.getElementById('dm-merge-window').value,
+    notify_poll_interval: document.getElementById('notify-poll-interval').value,
     comment_notify_enabled: document.getElementById('comment-notify-enabled').checked,
     dm_notify_enabled: document.getElementById('dm-notify-enabled').checked,
   });
