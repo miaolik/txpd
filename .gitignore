@@ -5,3 +5,4 @@ plugin_settings.json
 feed_schedules.json
 .cli/
 .home/
+.qqcli/
