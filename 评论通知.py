@@ -10,11 +10,12 @@
 3. 管理员发送「评论回复 内容」即可直接回复最近一条提醒的评论/回复
    （自动用对应账号槽位的身份调用 feed do-reply）。
 
-指令：评论通知 开启/关闭（默认开启）；私信冷却 秒数（同一人多条私信在
-冷却窗口内合并成一条提醒，默认 10 秒，0 为不合并）。
+指令：评论通知 开启/关闭、私信通知 开启/关闭（默认均开启）；私信冷却 秒数
+（同一人多条私信在冷却窗口内合并成一条提醒，默认 10 秒，0 为不合并）。
 """
 
 import asyncio
+import base64
 import hashlib
 import json
 import time
@@ -34,6 +35,7 @@ from .腾讯频道 import (
     _normalize_rate_limit,
     _read_json_file,
     _run_cli,
+    _run_cli_full,
     _set_setting,
     _set_switch,
     _text,
@@ -73,6 +75,10 @@ def _latest_ctx(kind: str) -> Optional[Dict[str, Any]]:
 
 def notify_enabled() -> bool:
     return _get_switch("comment_notify_enabled", True)
+
+
+def dm_notify_enabled() -> bool:
+    return _get_switch("dm_notify_enabled", True)
 
 
 def _get_sender():
@@ -584,8 +590,75 @@ def _is_dm_notice(item: Dict[str, Any]) -> bool:
 
 def _dm_fields(item: Dict[str, Any]) -> Dict[str, str]:
     peer = str(item.get("peer_tiny_id") or item.get("peerTinyId") or item.get("from_tiny_id") or item.get("tiny_id") or item.get("poster_tiny_id") or item.get("sender_tiny_id") or "").strip()
-    guild = str(item.get("source_guild_id") or item.get("sourceGuildId") or item.get("guild_id") or item.get("guildId") or "").strip()
-    return {"peer_tiny_id": peer, "source_guild_id": guild, "ref": str(item.get("ref") or "").strip()}
+    # source_guild_id 是对方所在的真实频道；通知里的 guild_id 是私信会话 ID，
+    # 不能用作 push-group-dm-msg 的 --source-guild-id，单独存为 dm_guild_id
+    guild = str(item.get("source_guild_id") or item.get("sourceGuildId") or "").strip()
+    dm_guild = str(item.get("guild_id") or item.get("guildId") or "").strip()
+    return {"peer_tiny_id": peer, "source_guild_id": guild, "dm_guild_id": dm_guild, "ref": str(item.get("ref") or "").strip()}
+
+
+def _decode_b64_nick(raw: str) -> str:
+    """私信报文里的昵称是 base64；解不出时按明文处理。"""
+    raw = str(raw or "").strip()
+    if not raw:
+        return ""
+    try:
+        return base64.b64decode(raw, validate=True).decode("utf-8").strip() or raw
+    except Exception:
+        return raw
+
+
+def _parse_dm_msgs(stderr: str) -> List[Dict[str, str]]:
+    """从 check-notices 的日志里解析私信原始报文，拿到真正的发送人
+    tinyId/昵称/来源频道（check-notices 的 poster_nick 取的是自己那一侧）。"""
+    msgs: List[Dict[str, str]] = []
+    for line in str(stderr or "").splitlines():
+        if "rsp query_guild_channel_msg" not in line:
+            continue
+        idx = line.find("{")
+        if idx < 0:
+            continue
+        try:
+            data = json.loads(line[idx:])
+        except Exception:
+            continue
+        wrapper = data.get("guildChannelMsg")
+        rows = wrapper.get("msgs") if isinstance(wrapper, dict) else None
+        if not isinstance(rows, list):
+            continue
+        for msg in rows:
+            if not isinstance(msg, dict):
+                continue
+            from_id = str(msg.get("fromTinyId") or "").strip()
+            nick = ""
+            source_guild = ""
+            ext = msg.get("extInfo")
+            members = ext.get("directMessageMembers") if isinstance(ext, dict) else None
+            if isinstance(members, list):
+                for member in members:
+                    if isinstance(member, dict) and str(member.get("tinyid") or "").strip() == from_id:
+                        nick = _decode_b64_nick(str(member.get("nickName") or ""))
+                        source_guild = str(member.get("sourceGuildId") or "").strip()
+            msgs.append({
+                "from_tiny_id": from_id,
+                "nick": nick,
+                "source_guild_id": source_guild,
+                "dm_guild_id": str(msg.get("guildId") or "").strip(),
+                "text": str(msg.get("text") or "").strip(),
+            })
+    return msgs
+
+
+def _match_dm_msg(msgs: List[Dict[str, str]], item: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """把通知项对应到原始私信：先按会话+正文匹配，退而求其次同会话任意一条
+    （同一私信会话的对方是固定的）。"""
+    dm_guild = str(item.get("guild_id") or item.get("guildId") or "").strip()
+    summary = _notice_text(item)
+    same_guild = [m for m in msgs if not dm_guild or m["dm_guild_id"] == dm_guild]
+    for m in same_guild:
+        if summary and m["text"] == summary:
+            return m
+    return same_guild[0] if same_guild else None
 
 
 _SENT_DM: List[Tuple[str, float]] = []
@@ -654,7 +727,8 @@ async def _flush_dm_group(key: Tuple[str, str], delay: float) -> None:
 async def _queue_dm_notice(user: str, fields: Dict[str, str], nick: str, content: str) -> None:
     """同一人在冷却窗口内的多条私信合并成一条提醒。"""
     window = dm_merge_window()
-    peer = fields["peer_tiny_id"] or fields["ref"] or nick or "unknown"
+    # dm_guild_id 是私信会话 ID，同一对方固定不变；ref 每条通知都不同，不能用作分组键
+    peer = fields["peer_tiny_id"] or fields.get("dm_guild_id") or nick or "unknown"
     key = (user, peer)
     entry = _DM_PENDING.get(key)
     if entry is not None:
@@ -673,7 +747,7 @@ async def _queue_dm_notice(user: str, fields: Dict[str, str], nick: str, content
 
 async def _poll_dm_slot(user: str) -> None:
     _seed_subscription(user)
-    ok, output = await asyncio.to_thread(_run_cli, ["manage", "check-notices", "--json"], None, user or None)
+    ok, output, stderr = await asyncio.to_thread(_run_cli_full, ["manage", "check-notices", "--json"], None, user or None)
     if not ok:
         return
     payload = _payload_of(output)
@@ -691,16 +765,22 @@ async def _poll_dm_slot(user: str) -> None:
         return
     seen.extend(k for k, _ in fresh)
     _write_json_file(seen_path, {"seen": seen[-SEEN_MAX:]})
+    dm_msgs = _parse_dm_msgs(stderr)
     for _, item in fresh:
         if _is_own_sent_dm(_notice_text(item)):
             continue
         fields = _dm_fields(item)
-        # 通知项自带的昵称字段可能是自己账号的，优先用对方 tiny_id 反查
+        # 通知项里的 poster_nick/guild_name 是自己那一侧的昵称，不可用；
+        # 发送人要从同次拉取的私信原始报文里取 fromTinyId 对应的成员
         nick = ""
-        if fields["peer_tiny_id"]:
+        msg = _match_dm_msg(dm_msgs, item)
+        if msg:
+            fields["peer_tiny_id"] = fields["peer_tiny_id"] or msg["from_tiny_id"]
+            fields["source_guild_id"] = fields["source_guild_id"] or msg["source_guild_id"]
+            fields["dm_guild_id"] = fields["dm_guild_id"] or msg["dm_guild_id"]
+            nick = msg["nick"]
+        if not nick and fields["peer_tiny_id"]:
             nick = await asyncio.to_thread(_lookup_nick, user, fields["source_guild_id"], fields["peer_tiny_id"])
-        if not nick:
-            nick = _item_nick(item)
         content = _notice_text(item) or "-"
         await _queue_dm_notice(user, fields, nick, content)
 
@@ -708,18 +788,22 @@ async def _poll_dm_slot(user: str) -> None:
 async def _poll_loop() -> None:
     while True:
         await asyncio.sleep(POLL_INTERVAL)
-        if not notify_enabled():
+        comment_on = notify_enabled()
+        dm_on = dm_notify_enabled()
+        if not comment_on and not dm_on:
             continue
         slots = _load_users()["users"] or [""]
         for user in slots:
-            try:
-                await _poll_slot(user)
-            except Exception:
-                pass
-            try:
-                await _poll_dm_slot(user)
-            except Exception:
-                pass
+            if comment_on:
+                try:
+                    await _poll_slot(user)
+                except Exception:
+                    pass
+            if dm_on:
+                try:
+                    await _poll_dm_slot(user)
+                except Exception:
+                    pass
 
 
 # ==================== 指令 ====================
@@ -729,6 +813,13 @@ async def handle_notify_toggle(event, match):
     enabled = match.group(1) == "开启"
     _set_switch("comment_notify_enabled", enabled)
     await event.reply(f"✅ 评论提醒已{'开启' if enabled else '关闭'}（每 {POLL_INTERVAL} 秒轮询各账号槽位的互动消息）")
+
+
+@admin_handler(r"^私信通知\s*(开启|关闭)$", ignore_at_check=True)
+async def handle_dm_notify_toggle(event, match):
+    enabled = match.group(1) == "开启"
+    _set_switch("dm_notify_enabled", enabled)
+    await event.reply(f"✅ 私信提醒已{'开启' if enabled else '关闭'}（每 {POLL_INTERVAL} 秒轮询各账号槽位的私信通知）")
 
 
 @admin_handler(r"^私信冷却(\s+\d+)?$", ignore_at_check=True)
@@ -818,7 +909,10 @@ async def handle_dm_reply(event, match):
         await event.reply("格式：私信回复 [编号] 内容")
         return
     user = str(found.get("user") or "")
-    if found.get("peer_tiny_id") and found.get("source_guild_id"):
+    if found.get("ref"):
+        # 优先用 CLI 本地通知编号回复（CLI 自动解析对方信息，最可靠）
+        args = ["manage", "push-group-dm-msg", "--ref", found["ref"], "--text", content, "--json"]
+    elif found.get("peer_tiny_id") and found.get("source_guild_id"):
         args = [
             "manage", "push-group-dm-msg",
             "--peer-tiny-id", found["peer_tiny_id"],
@@ -826,9 +920,6 @@ async def handle_dm_reply(event, match):
             "--text", content,
             "--json",
         ]
-    elif found.get("ref"):
-        # 通知项没带对方 tinyID 时用 CLI 本地通知编号回复（自动查对方信息）
-        args = ["manage", "push-group-dm-msg", "--ref", found["ref"], "--text", content, "--json"]
     else:
         await event.reply("这条私信提醒缺少对方信息，无法直接回复")
         return

@@ -275,6 +275,18 @@ def _save_admins(admins: List[str]) -> bool:
         return False
 
 
+def _admins_configured() -> bool:
+    """admins.txt 是否已填入自己的管理员（仅有内置默认值视为未配置）。"""
+    try:
+        if not ADMINS_FILE.exists():
+            return False
+        lines = ADMINS_FILE.read_text(encoding="utf-8").splitlines()
+        admins = [x.strip() for x in lines if x.strip() and not x.strip().startswith("#")]
+        return bool(admins) and admins != DEFAULT_ADMINS
+    except Exception:
+        return False
+
+
 def _is_plugin_admin(user_id: Any) -> bool:
     uid = str(user_id or "").strip()
     if not uid:
@@ -289,7 +301,16 @@ def admin_handler(pattern: str, **kwargs):
     def decorator(func):
         @functools.wraps(func)
         async def wrapped(event, match):
-            if not _is_plugin_admin(getattr(event, "user_id", "")):
+            uid = str(getattr(event, "user_id", "") or "").strip()
+            if not _is_plugin_admin(uid):
+                if not _admins_configured():
+                    try:
+                        await event.reply(
+                            "⚠️ 尚未配置插件管理员，请先在插件目录 admins.txt 或 Web 面板「插件管理员」页填入管理员ID。\n"
+                            f"你的ID：{uid or '未知'}"
+                        )
+                    except Exception:
+                        pass
                 return
             return await func(event, match)
 
@@ -2207,24 +2228,30 @@ def _login_post_hook(args: List[str], ok: bool, output: str, slot: str) -> None:
 
 
 def _run_cli(args: List[str], stdin_text: Optional[str] = None, user: Optional[str] = None) -> Tuple[bool, str]:
+    ok, output, _ = _run_cli_full(args, stdin_text, user)
+    return ok, output
+
+
+def _run_cli_full(args: List[str], stdin_text: Optional[str] = None, user: Optional[str] = None) -> Tuple[bool, str, str]:
+    """同 _run_cli，但额外返回 stderr（部分命令的原始报文只在日志里）。"""
     slot = _safe_user_name(user) or get_current_user()
     if KEYCHAIN_GLOBAL and slot:
         with _KEYCHAIN_LOCK:
             _migrate_keychain_to_slot(slot)
-            ok, output = _run_cli_raw(args, stdin_text, slot)
+            ok, output, stderr = _run_cli_raw(args, stdin_text, slot)
             _login_post_hook(args, ok, output, slot)
-            return ok, output
+            return ok, output, stderr
     return _run_cli_raw(args, stdin_text, user)
 
 
-def _run_cli_raw(args: List[str], stdin_text: Optional[str] = None, user: Optional[str] = None) -> Tuple[bool, str]:
+def _run_cli_raw(args: List[str], stdin_text: Optional[str] = None, user: Optional[str] = None) -> Tuple[bool, str, str]:
     cli = _resolve_cli()
     if not cli:
         return False, (
             "未找到 tencent-channel-cli，请将 CLI 放入插件目录"
             + ("" if IS_WINDOWS else "（如 tencent-channel-cli-linux-x64 二进制）")
             + "或安装 Node.js/npm 后执行 npm install -g tencent-channel-cli"
-        )
+        ), ""
     try:
         proc = subprocess.run(
             [cli, *args],
@@ -2238,14 +2265,14 @@ def _run_cli_raw(args: List[str], stdin_text: Optional[str] = None, user: Option
             timeout=90,
         )
     except subprocess.TimeoutExpired:
-        return False, "命令执行超时"
+        return False, "命令执行超时", ""
     except Exception as e:
-        return False, f"命令执行失败：{e}"
+        return False, f"命令执行失败：{e}", ""
     stdout = (proc.stdout or "").strip()
     stderr = (proc.stderr or "").strip()
     if proc.returncode != 0:
-        return False, stderr or stdout or f"命令执行失败，退出码 {proc.returncode}"
-    return True, stdout or stderr or ""
+        return False, stderr or stdout or f"命令执行失败，退出码 {proc.returncode}", stderr
+    return True, stdout or stderr or "", stderr
 
 
 def _with_preview(args: List[str]) -> List[str]:
