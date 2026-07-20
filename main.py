@@ -5,6 +5,7 @@
 from . import env_setup  # noqa: F401
 from . import 腾讯频道  # noqa: F401
 from . import feed_scheduler  # noqa: F401
+from . import 评论通知  # noqa: F401
 from . import web_panel  # noqa: F401
 
 __plugin_meta__ = {

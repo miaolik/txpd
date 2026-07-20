@@ -9,4 +9,5 @@ feed_schedules.json
 users/
 users.json
 keychain_owner.json
+comment_notify_seen.json
 post_history.json
