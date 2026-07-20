@@ -14,7 +14,7 @@ from core.plugin.decorators import on_load, on_unload
 from core.plugin.web_pages import register_page, register_route, unregister_page
 
 from . import feed_scheduler
-from .评论通知 import DM_MERGE_WINDOW_MAX, dm_merge_window
+from .评论通知 import DM_MERGE_WINDOW_MAX, dm_merge_window, dm_notify_enabled, notify_enabled
 from .腾讯频道 import (
     BASE_DIR,
     _extract_json,
@@ -25,6 +25,7 @@ from .腾讯频道 import (
     _run_cli,
     _save_admins,
     _set_setting,
+    _set_switch,
     add_user,
     remove_user,
     set_user_nickname,
@@ -214,22 +215,36 @@ async def api_save_admins(request: web.Request):
     return web.json_response({"success": True, "message": f"已保存 {len(admins)} 个管理员", "data": {"admins": _load_admins()}})
 
 
+def _notify_settings_data() -> Dict[str, Any]:
+    return {
+        "dm_merge_window": dm_merge_window(),
+        "max": DM_MERGE_WINDOW_MAX,
+        "comment_notify_enabled": notify_enabled(),
+        "dm_notify_enabled": dm_notify_enabled(),
+    }
+
+
 @register_route("GET", "/api/ext/txpd/notify-settings")
 async def api_get_notify_settings(request: web.Request):
-    return web.json_response({"success": True, "data": {"dm_merge_window": dm_merge_window(), "max": DM_MERGE_WINDOW_MAX}})
+    return web.json_response({"success": True, "data": _notify_settings_data()})
 
 
 @register_route("POST", "/api/ext/txpd/notify-settings")
 async def api_save_notify_settings(request: web.Request):
     body = await _json_body(request)
-    try:
-        value = int(body.get("dm_merge_window"))
-    except (TypeError, ValueError):
-        return web.json_response({"success": False, "message": "冷却时间需为整数秒数"})
-    if value < 0 or value > DM_MERGE_WINDOW_MAX:
-        return web.json_response({"success": False, "message": f"冷却时间需在 0-{DM_MERGE_WINDOW_MAX} 秒之间"})
-    _set_setting("dm_merge_window", value)
-    return web.json_response({"success": True, "message": f"私信合并冷却已设为 {value} 秒", "data": {"dm_merge_window": dm_merge_window()}})
+    if "dm_merge_window" in body:
+        try:
+            value = int(body.get("dm_merge_window"))
+        except (TypeError, ValueError):
+            return web.json_response({"success": False, "message": "冷却时间需为整数秒数"})
+        if value < 0 or value > DM_MERGE_WINDOW_MAX:
+            return web.json_response({"success": False, "message": f"冷却时间需在 0-{DM_MERGE_WINDOW_MAX} 秒之间"})
+        _set_setting("dm_merge_window", value)
+    if "comment_notify_enabled" in body:
+        _set_switch("comment_notify_enabled", bool(body.get("comment_notify_enabled")))
+    if "dm_notify_enabled" in body:
+        _set_switch("dm_notify_enabled", bool(body.get("dm_notify_enabled")))
+    return web.json_response({"success": True, "message": "通知设置已保存", "data": _notify_settings_data()})
 
 
 @register_route("GET", "/api/ext/txpd/schedules")
