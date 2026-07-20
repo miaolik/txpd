@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from core.plugin.decorators import interceptor, on_load, on_unload
+from core.plugin.decorators import on_load, on_unload
 
 from .腾讯频道 import (
     BASE_DIR,
@@ -43,17 +43,11 @@ POLL_INTERVAL = 60
 SEEN_MAX = 300
 NOTIFY_TEXT_LIMIT = 120
 CTX_MAX = 50
-# QQ 被动回复窗口：msg_id 在 5 分钟内可关联发送（不占主动推送额度且即时送达）
-PASSIVE_WINDOW = 270
-PASSIVE_MAX_USES = 4
 _TASK_NAME = "txpd_comment_notify"
 
 # 提醒上下文按编号保存（「评论回复 编号 内容」/「私信回复 编号 内容」）
 _CTXS: Dict[int, Dict[str, Any]] = {}
 _CTX_SEQ = [0]
-
-# 管理员最近一条消息的 msg_id，用于把主动推送变成被动回复（即时送达）
-_ADMIN_MSG: Dict[str, Dict[str, Any]] = {}
 
 
 def _push_ctx(ctx: Dict[str, Any]) -> int:
@@ -70,27 +64,6 @@ def _latest_ctx(kind: str) -> Optional[Dict[str, Any]]:
         if _CTXS[seq].get("kind") == kind:
             return _CTXS[seq]
     return None
-
-
-@interceptor(priority=-100)
-async def _record_admin_msg(event):
-    try:
-        user_id = str(event.user_id or "")
-        if user_id and event.message_id and user_id in _load_admins():
-            _ADMIN_MSG[user_id] = {"msg_id": event.message_id, "ts": time.time(), "uses": 0}
-    except Exception:
-        pass
-    return False
-
-
-def _passive_msg_id(admin: str) -> Optional[str]:
-    rec = _ADMIN_MSG.get(admin)
-    if not rec:
-        return None
-    if time.time() - rec["ts"] > PASSIVE_WINDOW or rec["uses"] >= PASSIVE_MAX_USES:
-        return None
-    rec["uses"] += 1
-    return str(rec["msg_id"])
 
 
 def notify_enabled() -> bool:
@@ -500,19 +473,17 @@ def _fill_missing_nicks(ctx: Dict[str, Any], user: str, limit: int = 10) -> None
 # ==================== 通知发送 ====================
 
 async def _dm_admins(text: str, image: Optional[bytes] = None, fallback_text: str = "") -> None:
-    """逐个私聊管理员；管理员 5 分钟内发过消息时关联其 msg_id 变被动回复，
-    即时送达；否则走主动推送（QQ 可能延迟到对方下次上线/发言才展示）。"""
+    """逐个私聊管理员，全部走主动消息推送（不关联 msg_id）。"""
     sender = _get_sender()
     if not sender:
         return
     for admin in _load_admins():
         try:
-            msg_id = _passive_msg_id(admin)
-            await sender.send_to_user(admin, text, msg_id=msg_id)
+            await sender.send_to_user(admin, text)
             if image:
                 await sender.send_image("user", admin, image, "")
             elif fallback_text:
-                await sender.send_to_user(admin, fallback_text, msg_id=_passive_msg_id(admin))
+                await sender.send_to_user(admin, fallback_text)
         except Exception:
             pass
 
