@@ -54,6 +54,7 @@ ACTIONS: Dict[str, Dict[str, Any]] = {
     "notices": {"base": ["feed", "get-notices"], "optional": {"attach_info": "--attach-info"}},
     "login-status": {"base": ["login", "status"]},
     "login": {"base": ["login"]},
+    "login-force": {"base": ["login"], "yes": True},
     "login-poll": {"base": ["login", "poll-token"]},
     "logout": {"base": ["login", "logout"]},
     # ── 频道管理 ──

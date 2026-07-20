@@ -35,6 +35,11 @@ def _cli_env(user: Optional[str] = None) -> Dict[str, str]:
     （users/槽位名）隔离 ~/.qqcli 登录态；未创建任何槽位时保持原有行为：
     Windows 用系统环境，Linux/macOS 在 HOME 缺失或不可写时回退到插件目录 .home。"""
     env = dict(os.environ)
+    if not IS_WINDOWS:
+        # 禁用系统钥匙串（secret service）：钥匙串是全局存储，不随 HOME 隔离，
+        # 会导致多个账号槽位共用同一个 token；禁用后 CLI 自动回退到
+        # 按 HOME 落盘（~/.qqcli/.env），每个槽位的 token 各自隔离。
+        env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/nonexistent-qqcli-keyring-disabled"
     name = _safe_user_name(user) or get_current_user()
     if name:
         home = _user_home(name)
@@ -1412,6 +1417,16 @@ async def handle_user_status(event, match):
 @admin_handler(r"^频道登录$", ignore_at_check=True)
 async def handle_login(event, match):
     """扫码授权登录：返回授权链接和二维码路径，扫码后发「频道登录确认」领取 token。"""
+    await _do_login(event, force=False)
+
+
+@admin_handler(r"^频道强制登录$", ignore_at_check=True)
+async def handle_login_force(event, match):
+    """强制重新扫码登录（覆盖当前槽位已有的登录态）。"""
+    await _do_login(event, force=True)
+
+
+async def _do_login(event, force: bool) -> None:
     current = get_current_user()
     if not current:
         await event.reply(
@@ -1420,7 +1435,8 @@ async def handle_login(event, match):
             "再发「频道登录」。每个槽位登录一个频道号，互不影响。"
         )
         return
-    ok, output = await asyncio.to_thread(_run_cli, ["login", "--json"])
+    args = ["login", "--json"] + (["--yes"] if force else [])
+    ok, output = await asyncio.to_thread(_run_cli, args)
     data = _extract_json(_normalize_rate_limit(output))
     payload = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else (data if isinstance(data, dict) else {})
     uri = str(payload.get("verification_uri") or "").strip()
@@ -1446,7 +1462,14 @@ async def handle_login(event, match):
         if qr and not qr_sent:
             await event.reply(f"二维码图片发送失败，可打开上方授权链接完成授权（二维码文件：{qr}）")
         return
-    await event.reply(_render_result("频道登录", ok, _normalize_rate_limit(output), ["login", "--json"]))
+    if not ok and "当前已登录" in str(output or ""):
+        await event.reply(
+            f"槽位「{current}」已有登录态。\n"
+            "发「频道登录状态」查看当前登录信息；\n"
+            "如要换号重新扫码，发「频道强制登录」（会覆盖本槽位登录态）"
+        )
+        return
+    await event.reply(_render_result("频道登录", ok, _normalize_rate_limit(output), args))
 
 @admin_handler(r"^频道登录确认$", ignore_at_check=True)
 async def handle_login_poll(event, match):
@@ -3231,6 +3254,7 @@ def _help_text() -> str:
         *_table(["命令", "说明"], [
             [_quick_cmd("频道登录") + " / " + _quick_cmd("频道登录确认"), "扫码授权登录到当前槽位（扫码后发确认）"],
             [_quick_cmd("频道登录状态") + " / " + _quick_cmd("频道退出登录"), "查看登录状态 / 退出登录"],
+            [_quick_cmd("频道强制登录"), "覆盖本槽位登录态，重新扫码换号"],
             [_quick_cmd("频道版本"), "查看 CLI 版本"],
             [_quick_cmd("频道MD帖 频道ID 版块ID Markdown正文", "MD帖"), "发 Markdown 短帖"],
             [_quick_cmd("频道MD长帖 频道ID 版块ID 标题 | Markdown正文", "MD长帖"), "发 Markdown 长帖"],

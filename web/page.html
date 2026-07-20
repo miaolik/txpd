@@ -393,7 +393,12 @@ async function acctStatus(name) {
 }
 async function acctLogin(name) {
   toast('获取授权链接中...', true);
-  const r = await api('cli', { action: 'login', params: {}, user: name });
+  let r = await api('cli', { action: 'login', params: {}, user: name });
+  const msg = JSON.stringify(r || {});
+  if (!r.success && msg.includes('当前已登录')) {
+    if (!await uiConfirm(`槽位「${name}」已有登录态，要覆盖并重新扫码登录吗？`)) return;
+    r = await api('cli', { action: 'login-force', params: {}, user: name });
+  }
   _acctResult(`扫码登录｜${name}（扫码后点「登录确认」）`, r);
 }
 async function acctLoginPoll(name) {
