@@ -10,4 +10,5 @@ users/
 users.json
 keychain_owner.json
 comment_notify_seen.json
+dm_notify_seen.json
 post_history.json
