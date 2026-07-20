@@ -14,7 +14,7 @@ import sys
 
 from core.plugin.decorators import on_load
 
-from .腾讯频道 import BASE_DIR, _resolve_cli
+from .腾讯频道 import BASE_DIR, _cli_env, _resolve_cli
 
 CLI_NAME = "tencent-channel-cli"
 LOCAL_PREFIX = BASE_DIR / ".cli"
@@ -26,6 +26,7 @@ async def _run_npm(npm: str, args: list) -> tuple:
         npm, *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
+        env=_cli_env(),
     )
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=NPM_INSTALL_TIMEOUT)
