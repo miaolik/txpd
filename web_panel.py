@@ -14,7 +14,15 @@ from core.plugin.decorators import on_load, on_unload
 from core.plugin.web_pages import register_page, register_route, unregister_page
 
 from . import feed_scheduler
-from .评论通知 import DM_MERGE_WINDOW_MAX, dm_merge_window, dm_notify_enabled, notify_enabled
+from .评论通知 import (
+    DM_MERGE_WINDOW_MAX,
+    POLL_INTERVAL_MAX,
+    POLL_INTERVAL_MIN,
+    dm_merge_window,
+    dm_notify_enabled,
+    notify_enabled,
+    notify_poll_interval,
+)
 from .腾讯频道 import (
     BASE_DIR,
     _extract_json,
@@ -221,6 +229,9 @@ def _notify_settings_data() -> Dict[str, Any]:
         "max": DM_MERGE_WINDOW_MAX,
         "comment_notify_enabled": notify_enabled(),
         "dm_notify_enabled": dm_notify_enabled(),
+        "notify_poll_interval": notify_poll_interval(),
+        "poll_interval_min": POLL_INTERVAL_MIN,
+        "poll_interval_max": POLL_INTERVAL_MAX,
     }
 
 
@@ -240,6 +251,14 @@ async def api_save_notify_settings(request: web.Request):
         if value < 0 or value > DM_MERGE_WINDOW_MAX:
             return web.json_response({"success": False, "message": f"冷却时间需在 0-{DM_MERGE_WINDOW_MAX} 秒之间"})
         _set_setting("dm_merge_window", value)
+    if "notify_poll_interval" in body:
+        try:
+            interval = int(body.get("notify_poll_interval"))
+        except (TypeError, ValueError):
+            return web.json_response({"success": False, "message": "轮询间隔需为整数秒数"})
+        if interval < POLL_INTERVAL_MIN or interval > POLL_INTERVAL_MAX:
+            return web.json_response({"success": False, "message": f"轮询间隔需在 {POLL_INTERVAL_MIN}-{POLL_INTERVAL_MAX} 秒之间"})
+        _set_setting("notify_poll_interval", interval)
     if "comment_notify_enabled" in body:
         _set_switch("comment_notify_enabled", bool(body.get("comment_notify_enabled")))
     if "dm_notify_enabled" in body:
