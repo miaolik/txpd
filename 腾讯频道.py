@@ -373,7 +373,11 @@ async def handle_token_setup(event, match):
         return
     token = parts[1].strip()
     _invalidate_self_user_cache(_fingerprint_token(token))
-    await _reply_cli(event, ["token", "setup", token], title="配置 token")
+    ok, output = await asyncio.to_thread(_run_cli, ["token", "setup", token])
+    if not ok and _is_unknown_command(output):
+        await event.reply("当前版本 CLI 不支持手动配置 token，请使用「频道登录」扫码授权登录")
+        return
+    await event.reply(_render_result("配置 token", ok, _normalize_rate_limit(output), ["token", "setup", token]))
 
 @admin_handler(r"^频道自检$", ignore_at_check=True)
 async def handle_self_check(event, match):
@@ -383,7 +387,7 @@ async def handle_self_check(event, match):
     self_cache = store.get("__self_user__") if isinstance(store.get("__self_user__"), dict) else {}
     short_token_count = len([k for k, v in store.items() if not str(k).startswith("__") and isinstance(v, dict)])
 
-    ok, output = await asyncio.to_thread(_run_cli, ["token", "verify"])
+    ok, output = await asyncio.to_thread(_run_cli_compat, ["login", "status", "--json"], ["token", "verify"])
     normalized_output = _normalize_rate_limit(output)
     data = _extract_json(normalized_output)
     verify_ok = bool(ok)
@@ -401,6 +405,10 @@ async def handle_self_check(event, match):
             if value:
                 verify_message = str(value)
                 break
+        if not verify_message:
+            error = data.get("error")
+            if isinstance(error, dict) and error.get("message"):
+                verify_message = str(error["message"])
         if not verify_message:
             for key in ("message", "msg", "error", "description"):
                 value = data.get(key)
@@ -1604,8 +1612,12 @@ def _refresh_guild_roles(payload: Optional[Dict[str, Any]]) -> None:
 
 
 def _sync_self_user_cache_with_token(user: Optional[str] = None) -> None:
+    if "manage token show" in _UNSUPPORTED_CLI_CMDS:
+        return
     ok, output = _run_cli(["manage", "token", "show", "--json"], user=user)
     if not ok:
+        if _is_unknown_command(output):
+            _UNSUPPORTED_CLI_CMDS.add("manage token show")
         return
     data = _extract_json(output)
     payload = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else {}
@@ -1905,6 +1917,21 @@ def _quick_cmd(text: str, show: Optional[str] = None, reference: Optional[bool] 
     return f"<qqbot-cmd-input {' '.join(attrs)} />"
 
 
+_UNSUPPORTED_CLI_CMDS: set = set()
+
+
+def _is_unknown_command(output: str) -> bool:
+    return "unknown command" in str(output or "").lower()
+
+
+def _run_cli_compat(primary: List[str], fallback: List[str], user: Optional[str] = None) -> Tuple[bool, str]:
+    """兼容不同版本 CLI：primary 报 unknown command 时改用旧命令 fallback。"""
+    ok, output = _run_cli(primary, user=user)
+    if not ok and _is_unknown_command(output):
+        return _run_cli(fallback, user=user)
+    return ok, output
+
+
 def _run_cli(args: List[str], stdin_text: Optional[str] = None, user: Optional[str] = None) -> Tuple[bool, str]:
     cli = _resolve_cli()
     if not cli:
@@ -2100,8 +2127,7 @@ def _render_result(title: str, ok: bool, output: str, args: List[str], guild_id:
     if "--dry-run" in args or "-d" in args:
         lines.append("模式：预演模式（仅验证参数，不实际执行）")
 
-    if isinstance(data, dict):
-        success = data.get("success")
+    success = data.get("success") if isinstance(data, dict) else None
     if isinstance(success, bool):
         for key in ("message", "msg", "error", "description"):
             value = data.get(key)
