@@ -639,6 +639,18 @@ function pickName(m) {
   return '';
 }
 
+function memberIds(m) {
+  const nested = m && typeof m === 'object' ? pick(m, ['user', 'member', 'profile']) : null;
+  const source = nested && typeof nested === 'object' ? [m, nested] : [m];
+  let tinyId = '';
+  let userId = '';
+  for (const item of source) {
+    if (!tinyId) tinyId = pick(item, ['tinyid', 'tiny_id', 'tinyId']);
+    if (!userId) userId = pick(item, ['user_id', 'userId', 'uid', 'id']);
+  }
+  return { tinyId: String(tinyId || ''), userId: String(userId || '') };
+}
+
 async function showMembers(gid) {
   currentGuild = gid;
   const card = document.getElementById('members-card');
@@ -662,16 +674,19 @@ async function showMembers(gid) {
   let html = '';
   for (const [label, items] of groups) {
     html += `<div class="muted" style="margin:8px 0 4px">${esc(label)}：${items.length} 人</div>`;
-    html += '<table><tr><th>昵称</th><th>tiny_id</th><th>操作</th></tr>';
+    html += '<table><tr><th>昵称</th><th>tiny_id</th><th>用户 ID</th><th>操作</th></tr>';
     for (const m of items) {
-      const tid = pick(m, ['tiny_id', 'tinyId', 'user_id', 'userId', 'id']);
+      const ids = memberIds(m);
+      const tid = ids.tinyId;
+      const uid = ids.userId;
       const nick = pickName(m) || '-';
-      html += `<tr><td>${esc(nick)}</td><td>${esc(tid)}</td><td>
-        <button class="btn sm" onclick="memberAction('add-admin','${esc(gid)}','${esc(tid)}','设为管理员')">设管理员</button>
-        <button class="btn sm gray" onclick="memberAction('remove-admin','${esc(gid)}','${esc(tid)}','取消管理员')">取消管理员</button>
-        <button class="btn sm gray" onclick="muteMember('${esc(gid)}','${esc(tid)}')">禁言</button>
-        <button class="btn sm gray" onclick="unmuteMember('${esc(gid)}','${esc(tid)}')">解除禁言</button>
-        <button class="btn sm red" onclick="kickMember('${esc(gid)}','${esc(tid)}','${esc(nick)}')">踢出</button>
+      const disabled = tid ? '' : ' disabled title="成员数据缺少 tiny_id，无法执行管理操作"';
+      html += `<tr><td>${esc(nick)}</td><td>${esc(tid || '-')}</td><td>${esc(uid || '-')}</td><td>
+        <button class="btn sm"${disabled} onclick="memberAction('add-admin','${esc(gid)}','${esc(tid)}','设为管理员')">设管理员</button>
+        <button class="btn sm gray"${disabled} onclick="memberAction('remove-admin','${esc(gid)}','${esc(tid)}','取消管理员')">取消管理员</button>
+        <button class="btn sm gray"${disabled} onclick="muteMember('${esc(gid)}','${esc(tid)}')">禁言</button>
+        <button class="btn sm gray"${disabled} onclick="unmuteMember('${esc(gid)}','${esc(tid)}')">解除禁言</button>
+        <button class="btn sm red"${disabled} onclick="kickMember('${esc(gid)}','${esc(tid)}','${esc(nick)}')">踢出</button>
       </td></tr>`;
     }
     html += '</table>';

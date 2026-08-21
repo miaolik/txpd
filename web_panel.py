@@ -126,8 +126,27 @@ async def _run_cli_json(args: List[str], user: str = "") -> Dict[str, Any]:
     result: Dict[str, Any] = {"success": ok}
     if data is not None:
         result["data"] = data
+        payload = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else data
+        if isinstance(payload, dict):
+            success = payload.get("success", data.get("success") if isinstance(data, dict) else None)
+            code = payload.get("retCode", payload.get("ret_code", data.get("retCode", data.get("ret_code", "")) if isinstance(data, dict) else ""))
+            if isinstance(success, bool):
+                result["success"] = result["success"] and success
+            if str(code).strip() not in ("", "0", "OK", "ok"):
+                result["success"] = False
+            if not result["success"]:
+                result["message"] = str(
+                    payload.get("message")
+                    or payload.get("msg")
+                    or payload.get("error")
+                    or (data.get("message") if isinstance(data, dict) else "")
+                    or (data.get("msg") if isinstance(data, dict) else "")
+                    or "操作未成功，请查看返回详情"
+                )
     else:
         result["raw"] = output.strip()[-2000:]
+        if not ok:
+            result["message"] = output.strip()[-500:] or "命令执行失败"
     return result
 
 
