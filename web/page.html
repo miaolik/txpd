@@ -532,13 +532,29 @@ async function loadGuilds() {
   el.innerHTML = '<div class="muted">加载中...</div>';
   const r = await cli('guilds');
   if (!r.success) { toast(r.message || '加载失败', false); renderJson(el, r); return; }
-  const items = listOf(payloadOf(r), ['guilds', 'guild_list', 'items', 'list']);
+  const payload = payloadOf(r);
+  const items = [];
+  const seen = new Set();
+  const addItems = (arr, group) => {
+    if (!Array.isArray(arr)) return;
+    for (const item of arr) {
+      if (!item || typeof item !== 'object') continue;
+      const gid = pick(item, ['guild_id', 'guildId', 'id']);
+      if (!gid || seen.has(String(gid))) continue;
+      seen.add(String(gid));
+      items.push({ ...item, _group: group });
+    }
+  };
+  for (const [key, label] of [['created_guilds', '我创建的频道'], ['managed_guilds', '我管理的频道'], ['joined_guilds', '我加入的频道']]) {
+    addItems(payload[key], label);
+  }
+  if (!items.length) addItems(listOf(payload, ['guilds', 'guild_list', 'items', 'list']), '频道');
   if (!items.length) { renderJson(el, r); return; }
-  let html = '<table><tr><th>频道名</th><th>频道ID</th><th>操作</th></tr>';
+  let html = '<table><tr><th>归属</th><th>频道名</th><th>频道ID</th><th>操作</th></tr>';
   for (const g of items) {
     const gid = pick(g, ['guild_id', 'guildId', 'id']);
     const name = pick(g, ['guild_name', 'guildName', 'name']) || '-';
-    html += `<tr><td>${esc(name)}</td><td>${esc(gid)}</td><td>
+    html += `<tr><td>${esc(g._group || '频道')}</td><td>${esc(name)}</td><td>${esc(gid)}</td><td>
       <button class="btn sm" onclick="showGuildInfo('${esc(gid)}')">资料</button>
       <button class="btn sm" onclick="showChannels('${esc(gid)}')">版块</button>
       <button class="btn sm" onclick="jumpFeeds('${esc(gid)}')">帖子</button>
@@ -701,7 +717,10 @@ async function memberAction(action, gid, tid, label) {
 async function muteMember(gid, tid) {
   const seconds = await uiPrompt('禁言时长（秒），例如 3600：', '3600');
   if (!seconds) return;
-  const r = await cli('mute', { guild_id: gid, tiny_id: tid, time_stamp: seconds.trim() });
+  const duration = Number.parseInt(seconds.trim(), 10);
+  if (!Number.isFinite(duration) || duration <= 0) return toast('禁言时长必须是正整数秒数', false);
+  const endTimestamp = Math.floor(Date.now() / 1000) + duration;
+  const r = await cli('mute', { guild_id: gid, tiny_id: tid, time_stamp: String(endTimestamp) });
   toast(r.success ? '已禁言' : (r.message || '失败'), r.success);
 }
 async function unmuteMember(gid, tid) {
