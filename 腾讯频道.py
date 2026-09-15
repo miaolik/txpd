@@ -1180,6 +1180,8 @@ async def handle_reply_comment(event, match):
             "--content", content,
             "--json",
         ]
+        if payload.get("guild_id") and payload.get("channel_id"):
+            args[2:2] = ["--guild-id", payload["guild_id"], "--channel-id", payload["channel_id"]]
         if payload.get("target_reply_id") and payload.get("target_user_id"):
             args[2:2] = ["--target-reply-id", payload["target_reply_id"], "--target-user-id", payload["target_user_id"]]
             if payload.get("target_user_nick"):
@@ -1585,6 +1587,145 @@ def _text(event) -> str:
 
 def _parts(event) -> List[str]:
     return _text(event).split()
+
+
+_COMMENT_NICK_KEYS = (
+    "author_nick", "poster_nick", "comment_author_nick", "comment_nick",
+    "nick", "nickname", "nick_name", "user_nick", "display_name", "user_name", "member_name",
+)
+_COMMENT_AUTHOR_ID_KEYS = (
+    "author_id", "comment_author_id", "poster_id", "reply_author_id",
+    "authorId", "user_id", "tinyid", "poster_tiny_id", "tiny_id", "tinyId",
+)
+_COMMENT_TIME_KEYS = (
+    "comment_create_time", "create_time_raw", "reply_create_time",
+    "create_time", "createTime", "created_at", "createdAt",
+)
+_NICK_CACHE: Dict[str, str] = {}
+
+
+def _comment_nick(item: Any) -> str:
+    """从评论/回复条目里取昵称（兼容多种字段与嵌套结构）。"""
+    if not isinstance(item, dict):
+        return ""
+    for key in _COMMENT_NICK_KEYS:
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    author = item.get("author")
+    if isinstance(author, str) and author.strip():
+        return author.strip()
+    for sub_key in ("poster", "author", "user", "user_info", "poster_info"):
+        sub = item.get(sub_key)
+        if isinstance(sub, dict):
+            for key in _COMMENT_NICK_KEYS:
+                value = str(sub.get(key) or "").strip()
+                if value:
+                    return value
+    return ""
+
+
+def _comment_author_id(item: Any) -> str:
+    """从评论/回复条目里取作者 tiny_id（兼容多种字段与嵌套结构）。"""
+    if not isinstance(item, dict):
+        return ""
+    for key in _COMMENT_AUTHOR_ID_KEYS:
+        value = str(item.get(key) or "").strip()
+        if value:
+            return value
+    for sub_key in ("poster", "author", "user", "user_info", "poster_info"):
+        sub = item.get(sub_key)
+        if isinstance(sub, dict):
+            for key in ("id",) + _COMMENT_AUTHOR_ID_KEYS:
+                value = str(sub.get(key) or "").strip()
+                if value:
+                    return value
+    return ""
+
+
+def _comment_create_time(item: Any) -> str:
+    if not isinstance(item, dict):
+        return ""
+    for key in _COMMENT_TIME_KEYS:
+        value = str(item.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _lookup_user_nick(tiny_id: Any, guild_id: Optional[str] = None, user: Optional[str] = None) -> str:
+    """评论接口不带昵称时用 get-user-info 按 tiny_id 补查（带缓存）。"""
+    tid = str(tiny_id or "").strip()
+    if not tid:
+        return ""
+    cache_key = f"{guild_id or ''}:{tid}"
+    if cache_key in _NICK_CACHE:
+        return _NICK_CACHE[cache_key]
+    args = ["manage", "get-user-info", "--tiny-id", tid, "--json"]
+    if guild_id:
+        args[2:2] = ["--guild-id", str(guild_id)]
+    nick = ""
+    ok, output = _run_cli(args, user=user or None)
+    if ok:
+        payload = _extract_json(output)
+        if isinstance(payload, dict):
+            body = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+            nick = _comment_nick(body)
+            if not nick and isinstance(body.get("member"), dict):
+                nick = _comment_nick(body["member"])
+    _NICK_CACHE[cache_key] = nick
+    if len(_NICK_CACHE) > 500:
+        _NICK_CACHE.pop(next(iter(_NICK_CACHE)), None)
+    return nick
+
+
+def _enrich_feed_comments(data: Any, feed_id: str, guild_id: Optional[str], user: Optional[str] = None, nick_limit: int = 15) -> None:
+    """给「帖子评论」返回补齐帖子级字段（作者/发帖时间/版块）并补查评论作者昵称。"""
+    if not isinstance(data, dict):
+        return
+    payload = data.get("data") if isinstance(data.get("data"), dict) else data
+    if not isinstance(payload, dict):
+        return
+    if feed_id:
+        payload.setdefault("feed_id", feed_id)
+    if guild_id:
+        payload.setdefault("guild_id", guild_id)
+    feed_author_id = payload.get("feed_author_id") or payload.get("author_id") or payload.get("authorId") or payload.get("feedAuthorId")
+    feed_create_time = payload.get("create_time_raw") or payload.get("feed_create_time") or payload.get("create_time") or payload.get("createTime")
+    channel_id = payload.get("channel_id") or payload.get("channelId")
+    if feed_id and (not feed_author_id or not feed_create_time or not channel_id):
+        detail_args = ["feed", "get-feed-detail", "--feed-id", str(feed_id), "--json"]
+        if guild_id:
+            detail_args[2:2] = ["--guild-id", str(guild_id)]
+        ok, output = _run_cli(detail_args, user=user or None)
+        if ok:
+            detail_data = _extract_json(output)
+            detail_payload = detail_data.get("data") if isinstance(detail_data, dict) and isinstance(detail_data.get("data"), dict) else {}
+            feed_obj = detail_payload.get("feed") if isinstance(detail_payload.get("feed"), dict) else detail_payload
+            if isinstance(feed_obj, dict):
+                feed_author_id = feed_author_id or feed_obj.get("author_id") or feed_obj.get("authorId") or feed_obj.get("feed_author_id")
+                feed_create_time = feed_create_time or feed_obj.get("create_time_raw") or feed_obj.get("feed_create_time") or feed_obj.get("create_time") or feed_obj.get("createTime")
+                channel_id = channel_id or feed_obj.get("channel_id") or feed_obj.get("channelId")
+    if feed_author_id:
+        payload.setdefault("feed_author_id", feed_author_id)
+    if feed_create_time:
+        payload.setdefault("feed_create_time", feed_create_time)
+        payload.setdefault("create_time_raw", feed_create_time)
+    if channel_id:
+        payload.setdefault("channel_id", channel_id)
+    items = payload.get("comments") or payload.get("items") or payload.get("list")
+    if not isinstance(items, list):
+        return
+    done = 0
+    for item in items[:20]:
+        if not isinstance(item, dict) or _comment_nick(item):
+            continue
+        if done >= nick_limit:
+            break
+        done += 1
+        nick = _lookup_user_nick(_comment_author_id(item), guild_id, user=user)
+        if nick:
+            item["author_nick"] = nick
 
 
 def _read_json_file(path: Path, default: Dict[str, Any]) -> Dict[str, Any]:
@@ -3081,23 +3222,18 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
 
     if title == "帖子评论":
         items = payload.get("comments") or payload.get("items") or payload.get("list")
+        param_guild_id = guild_id
         feed_id = payload.get("feed_id") or payload.get("feedId")
-        guild_id = payload.get("guild_id") or payload.get("guildId")
+        guild_id = payload.get("guild_id") or payload.get("guildId") or param_guild_id
+        # 兜底：补齐帖子级字段（作者/发帖时间/版块）并补查评论作者昵称
+        if feed_id:
+            _enrich_feed_comments(data, feed_id, guild_id, nick_limit=10)
+            payload = data.get("data") if isinstance(data.get("data"), dict) else data
+            items = payload.get("comments") or payload.get("items") or payload.get("list")
+            feed_id = payload.get("feed_id") or payload.get("feedId") or feed_id
+            guild_id = payload.get("guild_id") or payload.get("guildId") or guild_id
         feed_create_time = payload.get("create_time_raw") or payload.get("feed_create_time") or payload.get("create_time") or payload.get("createTime")
         feed_author_id_global = payload.get("feed_author_id") or payload.get("author_id") or payload.get("authorId") or payload.get("feedAuthorId")
-        # 帖子级字段缺失时补查一次帖子详情，保证每条评论都能生成「回复」按钮
-        if feed_id and (not feed_create_time or not feed_author_id_global):
-            detail_args = ["feed", "get-feed-detail", "--feed-id", str(feed_id), "--json"]
-            if guild_id:
-                detail_args[2:2] = ["--guild-id", str(guild_id)]
-            ok_detail, output_detail = _run_cli(detail_args)
-            if ok_detail:
-                detail_data = _extract_json(output_detail)
-                detail_payload = detail_data.get("data") if isinstance(detail_data, dict) and isinstance(detail_data.get("data"), dict) else {}
-                feed_obj = detail_payload.get("feed") if isinstance(detail_payload.get("feed"), dict) else detail_payload
-                if isinstance(feed_obj, dict):
-                    feed_create_time = feed_create_time or feed_obj.get("create_time_raw") or feed_obj.get("feed_create_time") or feed_obj.get("create_time") or feed_obj.get("createTime")
-                    feed_author_id_global = feed_author_id_global or feed_obj.get("author_id") or feed_obj.get("authorId") or feed_obj.get("feed_author_id")
         if feed_id and feed_create_time:
             lines.append(_quick_cmd(f"评论帖子 {feed_id} {feed_create_time} 内容", "发表评论"))
         if isinstance(items, list):
@@ -3107,7 +3243,7 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
             rows = []
             for item in items[:15]:
                 cid = item.get("comment_id") or item.get("commentId")
-                nick = item.get("author_nick") or item.get("nick") or item.get("nickname") or "未知用户"
+                nick = _comment_nick(item) or "未知用户"
                 content = item.get("content")
                 if isinstance(content, dict):
                     display_content = str(content.get("text") or "").strip()
@@ -3119,52 +3255,53 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
                 display_content = display_content or "-"
                 if len(display_content) > 60:
                     display_content = display_content[:60] + "..."
-                feed_id = payload.get("feed_id") or payload.get("feedId") or item.get("feed_id") or item.get("feedId")
+                item_feed_id = payload.get("feed_id") or payload.get("feedId") or item.get("feed_id") or item.get("feedId")
                 feed_author_id = feed_author_id_global or item.get("feed_author_id")
                 item_feed_create_time = feed_create_time or item.get("feed_create_time")
-                comment_author_id = item.get("author_id") or item.get("comment_author_id") or item.get("authorId")
-                comment_create_time = item.get("comment_create_time") or item.get("create_time_raw") or item.get("create_time") or item.get("createTime")
-                guild_id = item.get("guild_id") or item.get("guildId") or payload.get("guild_id") or payload.get("guildId")
+                comment_author_id = _comment_author_id(item)
+                comment_create_time = _comment_create_time(item)
+                item_guild_id = item.get("guild_id") or item.get("guildId") or payload.get("guild_id") or payload.get("guildId")
                 channel_id = item.get("channel_id") or item.get("channelId") or payload.get("channel_id") or payload.get("channelId")
                 attach_info = item.get("attach_info") or item.get("attachInfo")
                 ops = []
-                if feed_id and cid and feed_author_id and item_feed_create_time and comment_author_id:
+                if item_feed_id and cid and feed_author_id and item_feed_create_time and comment_author_id:
                     like_token = _save_token_payload("comment_like", {
-                        "feed_id": feed_id,
+                        "feed_id": item_feed_id,
                         "comment_id": cid,
                         "feed_author_id": feed_author_id,
                         "feed_create_time": item_feed_create_time,
                         "comment_author_id": comment_author_id,
-                        "guild_id": guild_id,
+                        "guild_id": item_guild_id,
                         "channel_id": channel_id,
                     })
                     delete_token = _save_token_payload("delete_comment", {
-                        "feed_id": feed_id,
+                        "feed_id": item_feed_id,
                         "comment_id": cid,
                         "comment_author_id": comment_author_id,
                         "feed_create_time": item_feed_create_time,
-                        "guild_id": guild_id,
+                        "guild_id": item_guild_id,
                         "channel_id": channel_id,
                     })
                     ops.append(_quick_cmd(f"评论点赞 {like_token}", "点赞"))
                     ops.append(_quick_cmd(f"评论取消点赞 {like_token}", "取消点赞"))
                     ops.append(_quick_cmd(f"删除评论 {delete_token}", "删除"))
-                if feed_id and cid and feed_author_id and item_feed_create_time and comment_author_id and comment_create_time:
+                if item_feed_id and cid and feed_author_id and item_feed_create_time and comment_author_id and comment_create_time:
                     reply_token = _save_token_payload("reply_comment", {
-                        "feed_id": feed_id,
+                        "feed_id": item_feed_id,
                         "comment_id": cid,
                         "feed_author_id": feed_author_id,
                         "feed_create_time": item_feed_create_time,
                         "comment_author_id": comment_author_id,
                         "comment_create_time": comment_create_time,
-                        "guild_id": guild_id,
+                        "guild_id": item_guild_id,
+                        "channel_id": channel_id,
                     })
                     ops.append(_quick_cmd(f"帖子评论回复 {reply_token} ", "回复"))
-                if feed_id and cid and guild_id and channel_id:
+                if item_feed_id and cid and item_guild_id and channel_id:
                     page_token = _save_token_payload("reply_page", {
-                        "feed_id": feed_id,
+                        "feed_id": item_feed_id,
                         "comment_id": cid,
-                        "guild_id": guild_id,
+                        "guild_id": item_guild_id,
                         "channel_id": channel_id,
                         "attach_info": attach_info,
                     })
@@ -3193,9 +3330,16 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
             comment_create_time = payload.get("comment_create_time")
             for item in items[:20]:
                 reply_id = item.get("reply_id") or item.get("replyId")
-                reply_author_id = item.get("author_id") or item.get("reply_author_id") or item.get("authorId")
-                nick = item.get("nick") or item.get("nickname") or item.get("author_nick") or "未知用户"
-                content = item.get("content") or ""
+                reply_author_id = _comment_author_id(item)
+                nick = _comment_nick(item) or "未知用户"
+                content = item.get("content")
+                if isinstance(content, dict):
+                    content = str(content.get("text") or "").strip()
+                else:
+                    content = str(content or "").strip()
+                rich_text = item.get("content_richtext") or item.get("contentRichtext") or item.get("rich_text")
+                if (not content) and isinstance(rich_text, dict):
+                    content = str(rich_text.get("text") or "").strip()
                 ops = []
                 if feed_id and comment_id and reply_id and feed_author_id and feed_create_time and comment_author_id and reply_author_id:
                     like_token = _save_token_payload("reply_like", {
