@@ -790,7 +790,7 @@ async function loadFeeds() {
   for (const f of items) {
     const fid = pick(f, ['feed_id', 'feedId', 'id']);
     const title = pick(f, ['title']) || String(pick(f, ['summary', 'content']) || '').slice(0, 40) || '-';
-    const author = pick(f, ['author_nick', 'nick', 'nickname']) || '-';
+    const author = pick(f, ['author_nick', 'poster_nick', 'nick', 'nickname', 'user_nick']) || '-';
     const ct = pick(f, ['create_time_raw', 'feed_create_time', 'create_time', 'createTime']);
     const aid = pick(f, ['author_id', 'authorId', 'feed_author_id']);
     const cid = pick(f, ['channel_id', 'channelId']);
