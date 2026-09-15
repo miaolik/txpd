@@ -1006,7 +1006,7 @@ async def handle_feed_detail(event, match):
         args[2:2] = ["--guild-id", guild_id]
     await _reply_cli(event, args, title="帖子详情", guild_id=guild_id)
 
-@admin_handler(r"^帖子评论\s+\S+$", ignore_at_check=True)
+@admin_handler(r"^帖子评论\s+\S+(?:\s+\S+)?$", ignore_at_check=True)
 async def handle_feed_comments(event, match):
     parts = _parts(event)
     if len(parts) < 2:
@@ -1078,11 +1078,11 @@ async def handle_reply_list(event, match):
     args += ["--json"]
     await _reply_cli(event, args, title="评论回复", guild_id=guild_id)
 
-@admin_handler(r"^帖子评论\s+\S+\s+\S+(?:\s+\S+)?(?:\s+.+)?$", ignore_at_check=True)
+@admin_handler(r"^评论帖子\s+\S+\s+\S+\s+.+$", ignore_at_check=True)
 async def handle_publish_comment(event, match):
     parts = _parts(event)
     if len(parts) < 4:
-        await event.reply("格式：帖子评论 <帖子ID> <帖子创建时间> [频道ID] [版块ID] <内容>")
+        await event.reply("格式：评论帖子 <帖子ID> <帖子创建时间> [频道ID] [版块ID] <内容>")
         return
     feed_id = parts[1]
     feed_create_time = parts[2]
@@ -1095,7 +1095,7 @@ async def handle_publish_comment(event, match):
         content_start = 5
     content = " ".join(parts[content_start:]).strip()
     if not content:
-        await event.reply("格式：帖子评论 <帖子ID> <帖子创建时间> [频道ID] [版块ID] <内容>")
+        await event.reply("格式：评论帖子 <帖子ID> <帖子创建时间> [频道ID] [版块ID] <内容>")
         return
     args = ["feed", "do-comment", "--feed-id", feed_id, "--feed-create-time", feed_create_time, "--content", content, "--json"]
     if guild_id and channel_id:
@@ -2967,7 +2967,7 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
                         " / ".join([
                             _quick_cmd(f"帖子详情 {feed_id}" + (f" {item_gid}" if item_gid else ""), "详情") if feed_id else "",
                             _quick_cmd(f"帖子评论 {feed_id}", "评论") if feed_id else "",
-                            _quick_cmd(f"帖子评论 {feed_id} {create_time} 内容", "回复") if feed_id and create_time else "",
+                            _quick_cmd(f"评论帖子 {feed_id} {create_time} 内容", "回复") if feed_id and create_time else "",
                         ]).strip(" /")
                     ])
                 else:
@@ -2976,7 +2976,7 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
                         ops.append(_quick_cmd(f"帖子详情 {feed_id}" + (f" {item_gid}" if item_gid else ""), "详情"))
                         ops.append(_quick_cmd(f"帖子评论 {feed_id}", "评论"))
                     if feed_id and create_time:
-                        ops.append(_quick_cmd(f"帖子评论 {feed_id} {create_time} 内容", "回复"))
+                        ops.append(_quick_cmd(f"评论帖子 {feed_id} {create_time} 内容", "回复"))
                     rows.append([_truncate_display_text(name, 24), " / ".join(ops)])
             if title == "频道搜帖":
                 lines.extend(_table(["帖子", "作者", "操作"], rows))
@@ -3060,7 +3060,7 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
         if feed_id:
             lines.append(_quick_cmd(f"帖子评论 {feed_id}" + (f" {gid}" if gid else ""), "评论列表"))
             if create_time:
-                lines.append(_quick_cmd(f"帖子评论 {feed_id} {create_time} 内容", "发表评论"))
+                lines.append(_quick_cmd(f"评论帖子 {feed_id} {create_time} 内容", "发表评论"))
             lines.append(_quick_cmd(f"帖子点赞 {feed_id}", "点赞"))
             lines.append(_quick_cmd(f"帖子取消点赞 {feed_id}", "取消点赞"))
         if feed_id and gid:
@@ -3099,7 +3099,7 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
                     feed_create_time = feed_create_time or feed_obj.get("create_time_raw") or feed_obj.get("feed_create_time") or feed_obj.get("create_time") or feed_obj.get("createTime")
                     feed_author_id_global = feed_author_id_global or feed_obj.get("author_id") or feed_obj.get("authorId") or feed_obj.get("feed_author_id")
         if feed_id and feed_create_time:
-            lines.append(_quick_cmd(f"帖子评论 {feed_id} {feed_create_time} 内容", "发表评论"))
+            lines.append(_quick_cmd(f"评论帖子 {feed_id} {feed_create_time} 内容", "发表评论"))
         if isinstance(items, list):
             lines.append(f"评论数：{len(items)}")
             if not items:
@@ -3487,7 +3487,7 @@ def _help_text() -> str:
             [_quick_cmd("帖子评论 帖子ID", "评论列表"), "查看评论列表"],
             [_quick_cmd("帖子回复 r123456", "更多回复"), "查看评论下回复（翻页令牌）"],
             [_quick_cmd("互动消息", "互动消息"), "查看互动通知"],
-            [_quick_cmd("帖子评论 帖子ID 帖子创建时间 内容", "发表评论"), "给帖子发表评论"],
+            [_quick_cmd("评论帖子 帖子ID 帖子创建时间 内容", "发表评论"), "给帖子发表评论"],
             [_quick_cmd("帖子回复 r123456 回复内容", "回复某条"), "回复指定回复"],
             [_quick_cmd("帖子评论回复 r123456 回复内容", "回复评论"), "回复指定评论"],
             [_quick_cmd("帖子点赞 帖子ID", "点赞") + " / " + _quick_cmd("帖子取消点赞 帖子ID", "取消点赞"), "帖子点赞 / 取消点赞"],

@@ -518,11 +518,14 @@ async def _notify_admins(user: str, item: Dict[str, Any], ctx: Dict[str, Any], t
         f"帖子：{ctx.get('title') or ctx.get('feed_id')}",
         f"{who}：{str(what)[:NOTIFY_TEXT_LIMIT]}",
     ]
+    buttons = None
     if target:
         lines.append(f"发送「评论回复 {seq} 内容」回复TA（不带编号默认回最新一条）")
+        # 指令按钮：点击后把「评论回复 N 」填入输入框，补上内容回车即可
+        buttons = [[{"text": f"评论回复 {seq}", "data": f"评论回复 {seq} ", "type": 2}]]
     image = await asyncio.to_thread(render_comments_image, ctx) if with_image else None
     fallback = _comments_as_text(ctx) if (with_image and not image and ctx["comments"]) else ""
-    await _dm_admins("\n".join(lines), image, fallback)
+    await _dm_admins("\n".join(lines), image, fallback, buttons=buttons)
 
 
 # ==================== 轮询 ====================
