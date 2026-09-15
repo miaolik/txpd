@@ -25,10 +25,13 @@ from .评论通知 import (
 )
 from .腾讯频道 import (
     BASE_DIR,
+    _comment_author_id,
+    _comment_nick,
     _extract_json,
     _get_self_user_id,
     _load_admins,
     _load_users,
+    _lookup_user_nick,
     _normalize_rate_limit,
     _run_cli,
     _save_admins,
@@ -150,6 +153,28 @@ async def _run_cli_json(args: List[str], user: str = "") -> Dict[str, Any]:
     return result
 
 
+def _fill_comment_nicks_from_result(result: Dict[str, Any], params: Dict[str, Any], user: str, limit: int = 10) -> None:
+    """评论接口不带昵称时按 tiny_id 补查（与指令端、评论通知保持一致）。"""
+    data = result.get("data")
+    payload = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else data
+    if not isinstance(payload, dict):
+        return
+    items = payload.get("comments") or payload.get("items") or payload.get("list")
+    if not isinstance(items, list):
+        return
+    guild_id = str(params.get("guild_id") or "").strip()
+    done = 0
+    for item in items:
+        if not isinstance(item, dict) or _comment_nick(item):
+            continue
+        if done >= limit:
+            break
+        done += 1
+        nick = _lookup_user_nick(_comment_author_id(item), guild_id, user=user)
+        if nick:
+            item["author_nick"] = nick
+
+
 async def _json_body(request: web.Request) -> Dict[str, Any]:
     try:
         data = await request.json()
@@ -169,7 +194,10 @@ async def api_cli(request: web.Request):
     built = _build_action_args(action, params, user)
     if "error" in built:
         return web.json_response({"success": False, "message": built["error"]})
-    return web.json_response(await _run_cli_json(built["args"], user))
+    result = await _run_cli_json(built["args"], user)
+    if action == "comments" and result.get("success"):
+        await asyncio.to_thread(_fill_comment_nicks_from_result, result, params, user)
+    return web.json_response(result)
 
 
 # ==================== 账号槽位 ====================

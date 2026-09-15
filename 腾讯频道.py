@@ -2413,7 +2413,7 @@ def _run_cli_raw(args: List[str], stdin_text: Optional[str] = None, user: Option
         ), ""
     try:
         proc = subprocess.run(
-            [cli, *args],
+            [str(cli), *[str(a) for a in args]],
             input=stdin_text,
             capture_output=True,
             text=True,
