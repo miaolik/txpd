@@ -14,6 +14,11 @@ description: How to end-to-end test the txpd plugin Web panel (Tencent channel m
 ## Safety (real account!)
 - Only channels explicitly whitelisted by the user (e.g. 「星星机器人」 guild `14413111660977050`, forum channel 「全部」 `635785591`) may receive real posts. Everywhere else: read-only, always click 取消 in confirm modals.
 
+## Recent fixes (Sep 2026)
+- **Comment/feed author nicknames**: Web panel now auto-fills missing nicknames via `get-user-info` for both comment lists and feed lists. If nicknames still show `-`, check that the account is logged in via CLI.
+- **"更多回复" button**: Only shown when a comment has `attach_info` (i.e., has more replies to load). Previously shown unconditionally, causing "attach_info 不能为空" errors.
+- **Reply command int args**: Fixed `expected str, bytes or os.PathLike object, not int` error when replying to comments via command (token fields are now coerced to str).
+
 ## Known pitfalls
 - Chinese input via synthetic typing gets corrupted. Use clipboard instead: `sudo apt-get install -y xclip`, then `printf '中文内容' | xclip -selection clipboard` and Ctrl+A/Ctrl+V in the field.
 - Markdown posts with images require `[(0,0)](@img)` placeholders in the content, otherwise the CLI rejects with a validation error.
