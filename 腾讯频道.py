@@ -1023,7 +1023,11 @@ async def handle_feed_comments(event, match):
         if payload.get("channel_id"):
             args += ["--channel-id", payload["channel_id"]]
         args += ["--attach-info", payload["attach_info"], "--json"]
-        await _reply_cli(event, args, title="帖子评论", guild_id=payload.get("guild_id"))
+        await _reply_cli(event, args, title="帖子评论", guild_id=payload.get("guild_id"), context={
+            "feed_id": payload.get("feed_id"),
+            "guild_id": payload.get("guild_id"),
+            "channel_id": payload.get("channel_id"),
+        })
         return
     feed_id = parts[1]
     guild_id = parts[2] if len(parts) >= 3 else None
@@ -1031,7 +1035,7 @@ async def handle_feed_comments(event, match):
     if guild_id:
         args += ["--guild-id", guild_id]
     args += ["--json"]
-    await _reply_cli(event, args, title="帖子评论", guild_id=guild_id)
+    await _reply_cli(event, args, title="帖子评论", guild_id=guild_id, context={"feed_id": feed_id, "guild_id": guild_id})
 
 @admin_handler(r"^帖子回复\s+.+$", ignore_at_check=True)
 async def handle_reply_list(event, match):
@@ -1060,7 +1064,16 @@ async def handle_reply_list(event, match):
         if attach_info:
             args += ["--attach-info", attach_info]
         args += ["--json"]
-        await _reply_cli(event, args, title="评论回复", guild_id=payload.get("guild_id"))
+        await _reply_cli(event, args, title="评论回复", guild_id=payload.get("guild_id"), context={
+            "feed_id": payload.get("feed_id"),
+            "comment_id": payload.get("comment_id"),
+            "feed_author_id": payload.get("feed_author_id"),
+            "feed_create_time": payload.get("feed_create_time"),
+            "comment_author_id": payload.get("comment_author_id"),
+            "comment_create_time": payload.get("comment_create_time"),
+            "guild_id": payload.get("guild_id"),
+            "channel_id": payload.get("channel_id"),
+        })
         return
     if len(parts) < 5:
         await event.reply("格式：帖子回复 <回复令牌> <内容> 或 帖子回复 <帖子ID> <评论ID> <频道ID> <版块ID> [attach_info]")
@@ -1076,7 +1089,12 @@ async def handle_reply_list(event, match):
     if len(parts) >= 6:
         args += ["--attach-info", " ".join(parts[5:]).strip()]
     args += ["--json"]
-    await _reply_cli(event, args, title="评论回复", guild_id=guild_id)
+    await _reply_cli(event, args, title="评论回复", guild_id=guild_id, context={
+        "feed_id": feed_id,
+        "comment_id": comment_id,
+        "guild_id": guild_id,
+        "channel_id": channel_id,
+    })
 
 @admin_handler(r"^评论帖子\s+\S+\s+\S+\s+.+$", ignore_at_check=True)
 async def handle_publish_comment(event, match):
@@ -2468,17 +2486,17 @@ def _normalize_rate_limit(output: str) -> str:
     return output
 
 
-async def _reply_cli(event, args: List[str], title: str, guild_id: Optional[str] = None):
+async def _reply_cli(event, args: List[str], title: str, guild_id: Optional[str] = None, context: Optional[Dict[str, Any]] = None):
     final_args = _with_preview(args)
     ok, output = await asyncio.to_thread(_run_cli, final_args)
-    await event.reply(_render_result(title, ok, _normalize_rate_limit(output), final_args, guild_id=guild_id))
+    await event.reply(_render_result(title, ok, _normalize_rate_limit(output), final_args, guild_id=guild_id, context=context))
 
 
-async def _reply_cli_json_stdin(event, args: List[str], payload: Dict[str, Any], title: str, guild_id: Optional[str] = None):
+async def _reply_cli_json_stdin(event, args: List[str], payload: Dict[str, Any], title: str, guild_id: Optional[str] = None, context: Optional[Dict[str, Any]] = None):
     final_args = _with_preview(args)
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     ok, output = await asyncio.to_thread(_run_cli, final_args, body)
-    await event.reply(_render_result(title, ok, _normalize_rate_limit(output), final_args, guild_id=guild_id))
+    await event.reply(_render_result(title, ok, _normalize_rate_limit(output), final_args, guild_id=guild_id, context=context))
 
 
 async def _handle_comment_like(event, like_type: str, title: str):
@@ -2573,8 +2591,22 @@ def _parse_duration_to_timestamp(text: str) -> Optional[int]:
     return int(time.time()) + total
 
 
-def _render_result(title: str, ok: bool, output: str, args: List[str], guild_id: Optional[str] = None) -> str:
-    data = _extract_json(output)
+def _apply_render_context(data: Any, context: Optional[Dict[str, Any]]) -> Any:
+    """把命令已知的上下文（如 feed_id/guild_id/channel_id）补进 CLI 返回，供渲染与生成指令使用。"""
+    if not isinstance(data, dict) or not context:
+        return data
+    for key, value in context.items():
+        if value is None or value == "":
+            continue
+        data.setdefault(key, value)
+        nested = data.get("data")
+        if isinstance(nested, dict):
+            nested.setdefault(key, value)
+    return data
+
+
+def _render_result(title: str, ok: bool, output: str, args: List[str], guild_id: Optional[str] = None, context: Optional[Dict[str, Any]] = None) -> str:
+    data = _apply_render_context(_extract_json(output), context)
     lines: List[str] = [f"{'✅' if ok else '❌'} {title}"]
 
     if "--dry-run" in args or "-d" in args:
@@ -3301,6 +3333,10 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
                     page_token = _save_token_payload("reply_page", {
                         "feed_id": item_feed_id,
                         "comment_id": cid,
+                        "feed_author_id": feed_author_id,
+                        "feed_create_time": item_feed_create_time,
+                        "comment_author_id": comment_author_id,
+                        "comment_create_time": comment_create_time,
                         "guild_id": item_guild_id,
                         "channel_id": channel_id,
                         "attach_info": attach_info,
@@ -3394,6 +3430,10 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
             page_token = _save_token_payload("reply_page", {
                 "feed_id": feed_id,
                 "comment_id": comment_id,
+                "feed_author_id": payload.get("feed_author_id") or payload.get("author_id"),
+                "feed_create_time": payload.get("feed_create_time") or payload.get("create_time_raw"),
+                "comment_author_id": payload.get("comment_author_id"),
+                "comment_create_time": payload.get("comment_create_time"),
                 "guild_id": guild_id,
                 "channel_id": channel_id,
                 "attach_info": attach_info,
