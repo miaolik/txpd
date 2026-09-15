@@ -3329,7 +3329,7 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
                         "channel_id": channel_id,
                     })
                     ops.append(_quick_cmd(f"帖子评论回复 {reply_token} ", "回复"))
-                if item_feed_id and cid and item_guild_id and channel_id:
+                if item_feed_id and cid and item_guild_id and channel_id and attach_info:
                     page_token = _save_token_payload("reply_page", {
                         "feed_id": item_feed_id,
                         "comment_id": cid,

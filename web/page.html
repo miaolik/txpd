@@ -871,7 +871,7 @@ async function showComments(fid, gid, cid, aid, ct) {
   html += '<table><tr><th>作者</th><th>内容</th><th>操作</th></tr>';
   for (const c of items) {
     const ccid = pick(c, ['comment_id', 'commentId']);
-    const nick = pick(c, ['author_nick', 'nick', 'nickname']) || '-';
+    const nick = pick(c, ['author_nick', 'poster_nick', 'comment_author_nick', 'comment_nick', 'nick', 'nickname', 'nick_name', 'user_nick']) || '-';
     let content = c.content;
     if (content && typeof content === 'object') content = content.text || '';
     const cAid = pick(c, ['author_id', 'comment_author_id', 'authorId']);
