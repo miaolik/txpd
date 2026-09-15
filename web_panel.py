@@ -165,7 +165,11 @@ def _fill_comment_nicks_from_result(result: Dict[str, Any], params: Dict[str, An
     guild_id = str(params.get("guild_id") or "").strip()
     done = 0
     for item in items:
-        if not isinstance(item, dict) or _comment_nick(item):
+        if not isinstance(item, dict):
+            continue
+        existing_nick = _comment_nick(item)
+        if existing_nick:
+            item.setdefault("author_nick", existing_nick)
             continue
         if done >= limit:
             break
