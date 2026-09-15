@@ -179,6 +179,35 @@ def _fill_comment_nicks_from_result(result: Dict[str, Any], params: Dict[str, An
             item["author_nick"] = nick
 
 
+def _fill_feed_author_nicks_from_result(result: Dict[str, Any], params: Dict[str, Any], user: str, limit: int = 10) -> None:
+    """帖子列表接口不带作者昵称时按 author_id 补查。"""
+    data = result.get("data")
+    payload = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else data
+    if not isinstance(payload, dict):
+        return
+    items = payload.get("feeds") or payload.get("feed_list") or payload.get("items") or payload.get("list") or payload.get("vecFeed")
+    if not isinstance(items, list):
+        return
+    guild_id = str(params.get("guild_id") or "").strip()
+    done = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        existing_nick = _comment_nick(item)
+        if existing_nick:
+            item.setdefault("author_nick", existing_nick)
+            continue
+        if done >= limit:
+            break
+        done += 1
+        author_id = str(item.get("author_id") or item.get("authorId") or item.get("feed_author_id") or "").strip()
+        if not author_id:
+            continue
+        nick = _lookup_user_nick(author_id, guild_id, user=user)
+        if nick:
+            item["author_nick"] = nick
+
+
 async def _json_body(request: web.Request) -> Dict[str, Any]:
     try:
         data = await request.json()
@@ -201,6 +230,8 @@ async def api_cli(request: web.Request):
     result = await _run_cli_json(built["args"], user)
     if action == "comments" and result.get("success"):
         await asyncio.to_thread(_fill_comment_nicks_from_result, result, params, user)
+    if action == "feeds" and result.get("success"):
+        await asyncio.to_thread(_fill_feed_author_nicks_from_result, result, params, user)
     return web.json_response(result)
 
 
