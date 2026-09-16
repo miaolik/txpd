@@ -2526,7 +2526,7 @@ async def _handle_comment_like(event, like_type: str, title: str):
 
 async def _handle_reply_like(event, like_type: str, title: str):
     parts = _parts(event)
-    if len(parts) >= 2 and re.fullmatch(r"l[0-9a-f]+", parts[1]):
+    if len(parts) >= 2 and re.fullmatch(r"r[0-9a-f]+", parts[1]):
         payload = _load_token_payload(parts[1], kind="reply_like")
         if not payload:
             await event.reply("回复点赞令牌无效或已过期，请重新打开回复列表后再试")
