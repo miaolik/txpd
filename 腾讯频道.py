@@ -1596,14 +1596,45 @@ async def handle_backup_account(event, match):
         await event.reply(f"保存备份文件失败: {exc}")
 
 
-@admin_handler(r"^频道导入账号(?:\s+\S+)?$", ignore_at_check=True)
+@admin_handler(r"^频道导入账号(?:\s+.+)?$", ignore_at_check=True)
 async def handle_restore_account(event, match):
-    """从备份恢复账号数据。需要上传备份的 ZIP 文件。"""
-    parts = _text(event).split(None, 1)
-    target_name = parts[1].strip() if len(parts) > 1 else None
+    """从本地备份文件恢复账号数据。格式：频道导入账号 <备份文件名> [目标槽位名]"""
+    parts = _text(event).split(None, 2)
     
-    await event.reply("请上传备份的 ZIP 文件（发送文件消息），收到后将自动恢复账号数据。\n\n提示：如果不指定槽位名，将使用备份中的原始名称。")
-    # 注：实际的文件接收需要在消息处理器中实现，这里只是提示用户
+    if len(parts) < 2:
+        # 列出可用的备份文件
+        backup_files = sorted([f.name for f in BASE_DIR.glob("backup_*.zip")], reverse=True)
+        if not backup_files:
+            await event.reply("未找到备份文件。\n\n使用「频道备份账号」创建备份。")
+            return
+        
+        files_list = "\n".join([f"- {f}" for f in backup_files[:10]])
+        await event.reply(f"可用的备份文件：\n{files_list}\n\n使用方法：频道导入账号 <文件名> [目标槽位名]\n\n示例：频道导入账号 {backup_files[0]}")
+        return
+    
+    backup_filename = parts[1].strip()
+    target_name = parts[2].strip() if len(parts) > 2 else None
+    
+    # 查找备份文件
+    backup_file = BASE_DIR / backup_filename
+    if not backup_file.exists():
+        # 尝试添加路径前缀
+        backup_file = BASE_DIR / f"backup_{backup_filename}"
+        if not backup_file.exists():
+            await event.reply(f"备份文件不存在: {backup_filename}\n\n发送「频道导入账号」查看可用的备份文件。")
+            return
+    
+    try:
+        zip_data = backup_file.read_bytes()
+        ok, msg = await asyncio.to_thread(restore_account_data, zip_data, target_name)
+        await event.reply(msg)
+        
+        if ok:
+            # 恢复成功后可选择删除备份文件
+            # backup_file.unlink()  # 取消注释以自动删除已恢复的备份
+            pass
+    except Exception as exc:
+        await event.reply(f"读取备份文件失败: {exc}")
 
 
 @admin_handler(r"^频道登录$", ignore_at_check=True)
@@ -3492,9 +3523,12 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
         return lines
 
     if title == "评论回复":
-        items = payload.get("items") or payload.get("replies") or payload.get("list")
+        items = payload.get("items") or payload.get("replies") or payload.get("list") or payload.get("reply_list")
         if isinstance(items, list):
-            lines.append(f"回复数：{len(items)}")
+            if not items:
+                lines.append("暂无回复")
+            else:
+                lines.append(f"回复数：{len(items)}")
             feed_id = payload.get("feed_id") or payload.get("feedId")
             comment_id = payload.get("comment_id") or payload.get("commentId")
             guild_id = payload.get("guild_id") or payload.get("guildId")
@@ -3503,6 +3537,7 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
             feed_create_time = payload.get("feed_create_time") or payload.get("create_time_raw")
             comment_author_id = payload.get("comment_author_id")
             comment_create_time = payload.get("comment_create_time")
+            rows = []
             for item in items[:20]:
                 reply_id = item.get("reply_id") or item.get("replyId")
                 reply_author_id = _comment_author_id(item)
@@ -3515,6 +3550,11 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
                 rich_text = item.get("content_richtext") or item.get("contentRichtext") or item.get("rich_text")
                 if (not content) and isinstance(rich_text, dict):
                     content = str(rich_text.get("text") or "").strip()
+                
+                display_content = content or "-"
+                if len(display_content) > 60:
+                    display_content = display_content[:60] + "..."
+                
                 ops = []
                 if feed_id and comment_id and reply_id and feed_author_id and feed_create_time and comment_author_id and reply_author_id:
                     like_token = _save_token_payload("reply_like", {
@@ -3528,7 +3568,7 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
                         "guild_id": guild_id,
                         "channel_id": channel_id,
                     })
-                    ops.append(_quick_cmd(f"回复点赞 {like_token}", "回复点赞"))
+                    ops.append(_quick_cmd(f"回复点赞 {like_token}", "点赞"))
                     ops.append(_quick_cmd(f"回复取消点赞 {like_token}", "取消点赞"))
                 if feed_id and comment_id and reply_id and reply_author_id and feed_author_id and feed_create_time and comment_author_id and comment_create_time:
                     delete_token = _save_token_payload("delete_reply", {
@@ -3543,7 +3583,7 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
                         "guild_id": guild_id,
                         "channel_id": channel_id,
                     })
-                    ops.append(_quick_cmd(f"删除回复 {delete_token}", "删除回复"))
+                    ops.append(_quick_cmd(f"删除回复 {delete_token}", "删除"))
                 if feed_id and comment_id and feed_author_id and feed_create_time and comment_author_id and comment_create_time:
                     reply_token = _save_token_payload("reply_comment", {
                         "feed_id": feed_id,
@@ -3557,9 +3597,10 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
                         "target_user_id": reply_author_id,
                         "target_user_nick": nick,
                     })
-                    show_text = f"继续回复 {_shrink_token(reply_id or comment_id)}"
-                    ops.append(_quick_cmd(f"帖子评论回复 {reply_token} ", show_text))
-                lines.append(f"- {nick}：{content[:80]}" + (f"（回复ID：{reply_id}）" if reply_id else "") + (f" {' '.join(ops)}" if ops else ""))
+                    ops.append(_quick_cmd(f"帖子评论回复 {reply_token} ", "回复"))
+                rows.append([_truncate_display_text(nick, 12), display_content, " / ".join(ops)])
+            if rows:
+                lines.extend(_table(["作者", "内容", "操作"], rows))
         attach_info = payload.get("attach_info") or payload.get("next_page_cookie")
         feed_id = payload.get("feed_id") or payload.get("feedId")
         comment_id = payload.get("comment_id") or payload.get("commentId")
