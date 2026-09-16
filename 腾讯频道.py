@@ -1124,7 +1124,7 @@ async def handle_feed_comments(event, match):
         if not payload:
             await event.reply("评论翻页令牌无效或已过期，请重新打开评论列表后再试")
             return
-        args = ["feed", "get-feed-comments", "--feed-id", payload["feed_id"]]
+        args = ["feed", "get-feed-comments", "--feed-id", payload["feed_id"], "--reply-list-num", "10"]
         if payload.get("guild_id"):
             args += ["--guild-id", payload["guild_id"]]
         if payload.get("channel_id"):
@@ -1138,7 +1138,7 @@ async def handle_feed_comments(event, match):
         return
     feed_id = parts[1]
     guild_id = parts[2] if len(parts) >= 3 else None
-    args = ["feed", "get-feed-comments", "--feed-id", feed_id]
+    args = ["feed", "get-feed-comments", "--feed-id", feed_id, "--reply-list-num", "10"]
     if guild_id:
         args += ["--guild-id", guild_id]
     args += ["--json"]
@@ -3538,7 +3538,29 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
                         "attach_info": attach_info,  # 可选字段，可能为 None
                     })
                     ops.append(_quick_cmd(f"帖子回复 {page_token}", "更多回复"))
+                
+                # 显示评论行
                 rows.append([_truncate_display_text(nick, 12), display_content, " / ".join(ops)])
+                
+                # 显示预加载的回复（--reply-list-num 返回的回复列表）
+                replies = item.get("replies") or item.get("replies_preview") or item.get("reply_list") or item.get("replyList")
+                if isinstance(replies, list) and replies:
+                    for reply in replies[:3]:  # 最多显示3条预加载回复
+                        if not isinstance(reply, dict):
+                            continue
+                        reply_nick = _comment_nick(reply) or "未知用户"
+                        reply_content = reply.get("content")
+                        if isinstance(reply_content, dict):
+                            reply_display = str(reply_content.get("text") or "").strip()
+                        else:
+                            reply_display = str(reply_content or "").strip()
+                        reply_rich_text = reply.get("content_richtext") or reply.get("contentRichtext") or reply.get("rich_text")
+                        if (not reply_display) and isinstance(reply_rich_text, dict):
+                            reply_display = str(reply_rich_text.get("text") or "").strip()
+                        reply_display = reply_display or "-"
+                        if len(reply_display) > 50:
+                            reply_display = reply_display[:50] + "..."
+                        rows.append([f"  ↳ {_truncate_display_text(reply_nick, 10)}", reply_display, ""])
             if rows:
                 lines.extend(_table(["作者", "内容", "操作"], rows))
         attach_info = payload.get("attach_info") or payload.get("next_page_cookie") or payload.get("attachinfo")
