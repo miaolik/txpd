@@ -2697,7 +2697,7 @@ async def _reply_cli_json_stdin(event, args: List[str], payload: Dict[str, Any],
 async def _handle_comment_like(event, like_type: str, title: str):
     parts = _parts(event)
     if len(parts) >= 2 and re.fullmatch(r"l[0-9a-f]+", parts[1]):
-        payload = _load_token_payload(parts[1], kind="comment_like")
+        payload = _load_token_payload(parts[1], kind="like_comment")
         if not payload:
             await event.reply("评论点赞令牌无效或已过期，请重新打开评论列表后再试")
             return
@@ -3492,7 +3492,7 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
                 attach_info = item.get("attach_info") or item.get("attachInfo")
                 ops = []
                 if item_feed_id and cid and feed_author_id and item_feed_create_time and comment_author_id:
-                    like_token = _save_token_payload("comment_like", {
+                    like_token = _save_token_payload("like_comment", {
                         "feed_id": item_feed_id,
                         "comment_id": cid,
                         "feed_author_id": feed_author_id,
