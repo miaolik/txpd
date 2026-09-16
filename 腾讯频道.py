@@ -3329,7 +3329,8 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
                         "channel_id": channel_id,
                     })
                     ops.append(_quick_cmd(f"帖子评论回复 {reply_token} ", "回复"))
-                if item_feed_id and cid and item_guild_id and channel_id and attach_info:
+                # 生成"更多回复"按钮：只要有必要的 ID 即可，attach_info 是可选的
+                if item_feed_id and cid and item_guild_id and channel_id:
                     page_token = _save_token_payload("reply_page", {
                         "feed_id": item_feed_id,
                         "comment_id": cid,
@@ -3339,7 +3340,7 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
                         "comment_create_time": comment_create_time,
                         "guild_id": item_guild_id,
                         "channel_id": channel_id,
-                        "attach_info": attach_info,
+                        "attach_info": attach_info,  # 可选字段，可能为 None
                     })
                     ops.append(_quick_cmd(f"帖子回复 {page_token}", "更多回复"))
                 rows.append([_truncate_display_text(nick, 12), display_content, " / ".join(ops)])
