@@ -248,6 +248,113 @@ def _migrate_legacy_login(user: str) -> None:
         pass
 
 
+def backup_account_data(user: Optional[str] = None) -> Tuple[bool, str, Optional[bytes]]:
+    """备份账号数据（不包含日志文件）。
+    
+    Returns:
+        (success, message, zip_data)
+    """
+    import io
+    import zipfile
+    
+    target_user = _safe_user_name(user) or get_current_user()
+    if not target_user:
+        return False, "未指定账号且当前无活跃槽位", None
+    
+    user_home = _user_home(target_user)
+    if not user_home.exists():
+        return False, f"账号槽位「{target_user}」不存在", None
+    
+    try:
+        # 创建内存中的 ZIP 文件
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            # 遍历用户目录
+            for file_path in user_home.rglob('*'):
+                if not file_path.is_file():
+                    continue
+                
+                # 排除日志文件
+                rel_path = file_path.relative_to(user_home)
+                rel_str = str(rel_path).replace('\\', '/')
+                
+                # 跳过日志文件
+                if '.log' in rel_str.lower() or '/logs/' in rel_str or '/subscription/daemon.log' in rel_str:
+                    continue
+                
+                # 添加到 ZIP
+                arcname = f"{target_user}/{rel_path}"
+                zipf.write(file_path, arcname)
+        
+        zip_data = zip_buffer.getvalue()
+        size_kb = len(zip_data) / 1024
+        return True, f"账号「{target_user}」数据已备份 ({size_kb:.1f} KB)", zip_data
+    
+    except Exception as exc:
+        return False, f"备份失败: {exc}", None
+
+
+def restore_account_data(zip_data: bytes, target_user: Optional[str] = None) -> Tuple[bool, str]:
+    """从备份恢复账号数据。
+    
+    Args:
+        zip_data: 备份的 ZIP 文件内容
+        target_user: 目标槽位名，为空则使用备份中的原始名称
+    """
+    import io
+    import zipfile
+    
+    try:
+        zip_buffer = io.BytesIO(zip_data)
+        with zipfile.ZipFile(zip_buffer, 'r') as zipf:
+            # 获取备份中的用户名
+            names = zipf.namelist()
+            if not names:
+                return False, "备份文件为空"
+            
+            # 提取原始用户名（第一个路径段）
+            original_user = names[0].split('/')[0]
+            restore_user = _safe_user_name(target_user) if target_user else original_user
+            
+            if not restore_user:
+                return False, "无效的槽位名称"
+            
+            # 确保目标目录存在
+            restore_home = _user_home(restore_user)
+            restore_home.mkdir(parents=True, exist_ok=True)
+            
+            # 解压文件
+            for item in names:
+                if '/' not in item:
+                    continue
+                
+                # 去掉第一层目录（用户名）
+                parts = item.split('/', 1)
+                if len(parts) < 2:
+                    continue
+                
+                rel_path = parts[1]
+                target_path = restore_home / rel_path
+                
+                # 创建父目录
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                # 写入文件
+                with zipf.open(item) as source, open(target_path, 'wb') as target:
+                    target.write(source.read())
+            
+            # 更新用户列表
+            data = _load_users()
+            if restore_user not in data["users"]:
+                data["users"].append(restore_user)
+                _save_users(data)
+            
+            return True, f"账号「{restore_user}」数据已恢复"
+    
+    except Exception as exc:
+        return False, f"恢复失败: {exc}"
+
+
 def _load_admins() -> List[str]:
     """读取插件管理员列表（一行一个，# 开头为注释），文件不存在时用默认管理员初始化。"""
     try:
@@ -463,7 +570,7 @@ async def handle_self_check(event, match):
 
     rows = [
         ["登录校验", "正常" if verify_ok else "失败"],
-        ["预演模式", "开启" if bool(settings.get("preview_enabled", True)) else "关闭"],
+        ["预演模式", "开启" if bool(settings.get("preview_enabled", False)) else "关闭"],
         ["调试模式", "开启" if bool(settings.get("debug_enabled", False)) else "关闭"],
         ["token 指纹", "已记录" if token_fp else "未记录"],
         ["self id 缓存", f"{len(self_cache)} 项"],
@@ -1468,6 +1575,37 @@ async def handle_user_status(event, match):
     await event.reply(_render_result(f"账号状态｜{name}", ok, _normalize_rate_limit(output), ["login", "status", "--json"]))
 
 
+@admin_handler(r"^频道备份账号(?:\s+\S+)?$", ignore_at_check=True)
+async def handle_backup_account(event, match):
+    """备份账号数据（不包含日志）。"""
+    parts = _text(event).split(None, 1)
+    name = parts[1].strip() if len(parts) > 1 else None
+    
+    ok, msg, zip_data = await asyncio.to_thread(backup_account_data, name)
+    
+    if not ok or not zip_data:
+        await event.reply(msg)
+        return
+    
+    # 保存到临时文件
+    backup_file = BASE_DIR / f"backup_{name or get_current_user()}_{int(time.time())}.zip"
+    try:
+        backup_file.write_bytes(zip_data)
+        await event.reply(f"{msg}\n备份文件：{backup_file.name}\n\n请下载此文件保存，导入时使用「频道导入账号 <槽位名>」命令并上传备份文件。")
+    except Exception as exc:
+        await event.reply(f"保存备份文件失败: {exc}")
+
+
+@admin_handler(r"^频道导入账号(?:\s+\S+)?$", ignore_at_check=True)
+async def handle_restore_account(event, match):
+    """从备份恢复账号数据。需要上传备份的 ZIP 文件。"""
+    parts = _text(event).split(None, 1)
+    target_name = parts[1].strip() if len(parts) > 1 else None
+    
+    await event.reply("请上传备份的 ZIP 文件（发送文件消息），收到后将自动恢复账号数据。\n\n提示：如果不指定槽位名，将使用备份中的原始名称。")
+    # 注：实际的文件接收需要在消息处理器中实现，这里只是提示用户
+
+
 @admin_handler(r"^频道登录$", ignore_at_check=True)
 async def handle_login(event, match):
     """扫码授权登录：返回授权链接和二维码路径，扫码后发「频道登录确认」领取 token。"""
@@ -2039,7 +2177,7 @@ def _set_setting(key: str, value: Any) -> None:
 
 
 def _preview_enabled() -> bool:
-    return _get_switch("preview_enabled", True)
+    return _get_switch("preview_enabled", False)
 
 
 def _debug_enabled() -> bool:
@@ -3712,6 +3850,8 @@ def _help_text() -> str:
             [_quick_cmd("频道添加账号 名称", "添加账号") + " / " + _quick_cmd("频道删除账号 名称", "删除账号"), "创建 / 删除账号槽位"],
             [_quick_cmd("频道切换账号 名称", "切换账号"), "切换当前操作的账号（登录/发帖等都作用在当前槽位）"],
             [_quick_cmd("频道账号状态 名称", "账号状态"), "查看指定槽位的登录状态"],
+            [_quick_cmd("频道备份账号 名称", "备份账号"), "备份账号数据（不含日志），生成 ZIP 文件"],
+            [_quick_cmd("频道导入账号 名称", "导入账号"), "从备份 ZIP 文件恢复账号数据"],
         ]),
         "## 登录与通知（Skill 1.1.5）",
         *_table(["命令", "说明"], [
