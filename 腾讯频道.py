@@ -3346,6 +3346,10 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
                         ops.append(_quick_cmd(f"帖子评论 {feed_id}", "评论"))
                     if feed_id and create_time:
                         ops.append(_quick_cmd(f"评论帖子 {feed_id} {create_time} 内容", "回复"))
+                    # 添加帖子点赞 / 取消点赞
+                    if feed_id:
+                        ops.append(_quick_cmd(f"帖子点赞 {feed_id}", "点赞"))
+                        ops.append(_quick_cmd(f"帖子取消点赞 {feed_id}", "取消点赞"))
                     rows.append([_truncate_display_text(name, 24), " / ".join(ops)])
             if title == "频道搜帖":
                 lines.extend(_table(["帖子", "作者", "操作"], rows))
