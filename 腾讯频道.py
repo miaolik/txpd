@@ -608,7 +608,7 @@ async def handle_self_check(event, match):
 async def handle_guild_list(event, match):
     parts = _parts(event)
     token = parts[1] if len(parts) >= 2 else None
-    if token and re.fullmatch(r"g[0-9a-f]+", token):
+    if token and re.fullmatch(r"[a-z][0-9a-f]+", token):
         payload = _load_token_payload(token, kind="guild_list_page")
         if not payload:
             await event.reply("频道列表翻页令牌无效或已过期，请重新打开频道列表后再试")
@@ -757,7 +757,7 @@ async def handle_upload_guild_avatar(event, match):
 async def handle_member_list(event, match):
     parts = _parts(event)
     guild_id = parts[1]
-    if len(parts) >= 3 and re.fullmatch(r"m[0-9a-f]+", parts[2]):
+    if len(parts) >= 3 and re.fullmatch(r"[a-z][0-9a-f]+", parts[2]):
         payload = _load_token_payload(parts[2], kind="member_page")
         if not payload:
             await event.reply("成员翻页令牌无效或已过期，请重新打开成员列表后再试")
@@ -856,7 +856,7 @@ async def handle_kick_member(event, match):
 async def handle_search_guilds(event, match):
     parts = _parts(event)
     # 支持翻页令牌（g 开头）
-    if len(parts) >= 2 and re.fullmatch(r"s[0-9a-f]+", parts[1]):
+    if len(parts) >= 2 and re.fullmatch(r"[a-z][0-9a-f]+", parts[1]):
         payload = _load_token_payload(parts[1], kind="search_guild_page")
         if not payload:
             await event.reply("搜频道翻页令牌无效或已过期，请重新搜索后再试")
@@ -876,7 +876,7 @@ async def handle_search_guilds(event, match):
 async def handle_search_authors(event, match):
     parts = _parts(event)
     # 支持翻页令牌（g 开头）
-    if len(parts) >= 2 and re.fullmatch(r"s[0-9a-f]+", parts[1]):
+    if len(parts) >= 2 and re.fullmatch(r"[a-z][0-9a-f]+", parts[1]):
         payload = _load_token_payload(parts[1], kind="search_guild_page")
         if not payload:
             await event.reply("搜作者翻页令牌无效或已过期，请重新搜索后再试")
@@ -896,7 +896,7 @@ async def handle_search_authors(event, match):
 async def handle_search_feeds_global(event, match):
     parts = _parts(event)
     # 支持翻页令牌（s 开头）
-    if len(parts) >= 2 and re.fullmatch(r"s[0-9a-f]+", parts[1]):
+    if len(parts) >= 2 and re.fullmatch(r"[a-z][0-9a-f]+", parts[1]):
         payload = _load_token_payload(parts[1], kind="search_feed_global_page")
         if not payload:
             await event.reply("全局搜帖翻页令牌无效或已过期，请重新搜索后再试")
@@ -1045,7 +1045,7 @@ async def handle_leave_guild(event, match):
 async def handle_notices(event, match):
     parts = _parts(event)
     # 支持翻页令牌（n 开头）
-    if len(parts) >= 2 and re.fullmatch(r"n[0-9a-f]+", parts[1]):
+    if len(parts) >= 2 and re.fullmatch(r"[a-z][0-9a-f]+", parts[1]):
         payload = _load_token_payload(parts[1], kind="notice_page")
         if not payload:
             await event.reply("互动消息翻页令牌无效或已过期，请重新打开互动消息后再试")
@@ -1068,7 +1068,7 @@ async def handle_notices(event, match):
 async def handle_feed_list(event, match):
     parts = _parts(event)
     guild_id = parts[1]
-    if len(parts) >= 3 and re.fullmatch(r"f[0-9a-f]+", parts[2]):
+    if len(parts) >= 3 and re.fullmatch(r"[a-z][0-9a-f]+", parts[2]):
         payload = _load_token_payload(parts[2], kind="feed_page")
         if not payload:
             await event.reply("帖子翻页令牌无效或已过期，请重新打开帖子列表后再试")
@@ -1085,7 +1085,7 @@ async def handle_feed_list(event, match):
 async def handle_search_feeds(event, match):
     parts = _parts(event)
     guild_id = parts[1]
-    if len(parts) >= 3 and re.fullmatch(r"f[0-9a-f]+", parts[2]):
+    if len(parts) >= 3 and re.fullmatch(r"[a-z][0-9a-f]+", parts[2]):
         payload = _load_token_payload(parts[2], kind="search_feed_page")
         if not payload:
             await event.reply("搜帖翻页令牌无效或已过期，请重新打开搜索结果后再试")
@@ -1119,7 +1119,7 @@ async def handle_feed_comments(event, match):
     if len(parts) < 2:
         await event.reply("格式：帖子评论 <帖子ID> [频道ID] 或 帖子评论 <评论翻页令牌>")
         return
-    if re.fullmatch(r"c[0-9a-f]+", parts[1]):
+    if re.fullmatch(r"[a-z][0-9a-f]+", parts[1]):
         payload = _load_token_payload(parts[1], kind="comment_page")
         if not payload:
             await event.reply("评论翻页令牌无效或已过期，请重新打开评论列表后再试")
@@ -1148,7 +1148,7 @@ async def handle_feed_comments(event, match):
 async def handle_reply_list(event, match):
     """帖子回复统一入口：回复令牌回复评论 / 翻页令牌看更多回复 / 显式参数查回复列表。"""
     parts = _parts(event)
-    if len(parts) >= 2 and re.fullmatch(r"r[0-9a-f]+", parts[1]):
+    if len(parts) >= 2 and re.fullmatch(r"[a-z][0-9a-f]+", parts[1]):
         token = parts[1]
         payload = _load_token_payload(token, kind="reply_page")
         if not payload:
@@ -1279,7 +1279,7 @@ async def handle_feed_unlike(event, match):
 @admin_handler(r"^帖子评论回复\s+.+$", ignore_at_check=True)
 async def handle_reply_comment(event, match):
     parts = _parts(event)
-    if len(parts) >= 3 and re.fullmatch(r"r[0-9a-f]+", parts[1]):
+    if len(parts) >= 3 and re.fullmatch(r"[a-z][0-9a-f]+", parts[1]):
         token = parts[1]
         payload = _load_token_payload(token, kind="reply_comment")
         if not payload:
@@ -1335,7 +1335,7 @@ async def handle_reply_comment(event, match):
 @admin_handler(r"^删除评论\s+.+$", ignore_at_check=True)
 async def handle_delete_comment(event, match):
     parts = _parts(event)
-    if len(parts) >= 2 and re.fullmatch(r"d[0-9a-f]+", parts[1]):
+    if len(parts) >= 2 and re.fullmatch(r"[a-z][0-9a-f]+", parts[1]):
         payload = _load_token_payload(parts[1], kind="delete_comment")
         if not payload:
             await event.reply("删除评论令牌无效或已过期，请重新打开评论列表后再试")
@@ -1377,7 +1377,7 @@ async def handle_delete_comment(event, match):
 @admin_handler(r"^删除回复\s+.+$", ignore_at_check=True)
 async def handle_delete_reply(event, match):
     parts = _parts(event)
-    if len(parts) >= 2 and re.fullmatch(r"d[0-9a-f]+", parts[1]):
+    if len(parts) >= 2 and re.fullmatch(r"[a-z][0-9a-f]+", parts[1]):
         payload = _load_token_payload(parts[1], kind="delete_reply")
         if not payload:
             await event.reply("删除回复令牌无效或已过期，请重新打开回复列表后再试")
@@ -2696,7 +2696,7 @@ async def _reply_cli_json_stdin(event, args: List[str], payload: Dict[str, Any],
 
 async def _handle_comment_like(event, like_type: str, title: str):
     parts = _parts(event)
-    if len(parts) >= 2 and re.fullmatch(r"l[0-9a-f]+", parts[1]):
+    if len(parts) >= 2 and re.fullmatch(r"[a-z][0-9a-f]+", parts[1]):
         payload = _load_token_payload(parts[1], kind="like_comment")
         if not payload:
             await event.reply("评论点赞令牌无效或已过期，请重新打开评论列表后再试")
@@ -2721,7 +2721,7 @@ async def _handle_comment_like(event, like_type: str, title: str):
 
 async def _handle_reply_like(event, like_type: str, title: str):
     parts = _parts(event)
-    if len(parts) >= 2 and re.fullmatch(r"r[0-9a-f]+", parts[1]):
+    if len(parts) >= 2 and re.fullmatch(r"[a-z][0-9a-f]+", parts[1]):
         payload = _load_token_payload(parts[1], kind="reply_like")
         if not payload:
             await event.reply("回复点赞令牌无效或已过期，请重新打开回复列表后再试")
