@@ -3524,20 +3524,6 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
                         "channel_id": channel_id,
                     })
                     ops.append(_quick_cmd(f"帖子评论回复 {reply_token} ", "回复"))
-                # 生成"更多回复"按钮：只要有必要的 ID 即可，attach_info 是可选的
-                if item_feed_id and cid and item_guild_id and channel_id:
-                    page_token = _save_token_payload("reply_page", {
-                        "feed_id": item_feed_id,
-                        "comment_id": cid,
-                        "feed_author_id": feed_author_id,
-                        "feed_create_time": item_feed_create_time,
-                        "comment_author_id": comment_author_id,
-                        "comment_create_time": comment_create_time,
-                        "guild_id": item_guild_id,
-                        "channel_id": channel_id,
-                        "attach_info": attach_info,  # 可选字段，可能为 None
-                    })
-                    ops.append(_quick_cmd(f"帖子回复 {page_token}", "更多回复"))
                 
                 # 显示评论行
                 rows.append([_truncate_display_text(nick, 12), display_content, " / ".join(ops)])
@@ -3545,11 +3531,12 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
                 # 显示预加载的回复（--reply-list-num 返回的回复列表）
                 replies = item.get("replies") or item.get("replies_preview") or item.get("reply_list") or item.get("replyList")
                 if isinstance(replies, list) and replies:
-                    for reply in replies[:3]:  # 最多显示3条预加载回复
+                    for reply in replies[:10]:  # 最多显示10条预加载回复
                         if not isinstance(reply, dict):
                             continue
                         reply_id = reply.get("reply_id") or reply.get("replyId")
                         reply_author_id = _comment_author_id(reply)
+                        reply_create_time = _comment_create_time(reply)
                         reply_nick = _comment_nick(reply) or "未知用户"
                         reply_content = reply.get("content")
                         if isinstance(reply_content, dict):
@@ -3563,8 +3550,9 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
                         if len(reply_display) > 50:
                             reply_display = reply_display[:50] + "..."
                         
-                        # 为回复生成操作按钮
+                        # 为回复生成完整操作按钮
                         reply_ops = []
+                        # 点赞 / 取消点赞
                         if item_feed_id and cid and reply_id and feed_author_id and item_feed_create_time and comment_author_id and reply_author_id:
                             like_token = _save_token_payload("reply_like", {
                                 "feed_id": item_feed_id,
@@ -3578,6 +3566,39 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
                                 "channel_id": channel_id,
                             })
                             reply_ops.append(_quick_cmd(f"回复点赞 {like_token}", "点赞"))
+                            reply_ops.append(_quick_cmd(f"回复取消点赞 {like_token}", "取消点赞"))
+                        
+                        # 删除（需要 reply_create_time）
+                        if item_feed_id and cid and reply_id and reply_author_id and feed_author_id and item_feed_create_time and comment_author_id and comment_create_time:
+                            delete_token = _save_token_payload("delete_reply", {
+                                "feed_id": item_feed_id,
+                                "comment_id": cid,
+                                "reply_id": reply_id,
+                                "replier_id": reply_author_id,
+                                "feed_author_id": feed_author_id,
+                                "feed_create_time": item_feed_create_time,
+                                "comment_author_id": comment_author_id,
+                                "comment_create_time": comment_create_time,
+                                "guild_id": item_guild_id,
+                                "channel_id": channel_id,
+                            })
+                            reply_ops.append(_quick_cmd(f"删除回复 {delete_token}", "删除"))
+                        
+                        # 回复这条回复
+                        if item_feed_id and cid and feed_author_id and item_feed_create_time and comment_author_id and comment_create_time:
+                            reply_token = _save_token_payload("reply_comment", {
+                                "feed_id": item_feed_id,
+                                "comment_id": cid,
+                                "feed_author_id": feed_author_id,
+                                "feed_create_time": item_feed_create_time,
+                                "comment_author_id": comment_author_id,
+                                "comment_create_time": comment_create_time,
+                                "guild_id": item_guild_id,
+                                "target_reply_id": reply_id,
+                                "target_user_id": reply_author_id,
+                                "target_user_nick": reply_nick,
+                            })
+                            reply_ops.append(_quick_cmd(f"帖子评论回复 {reply_token} ", "回复"))
                         
                         rows.append([f"  ↳ {_truncate_display_text(reply_nick, 10)}", reply_display, " / ".join(reply_ops) if reply_ops else ""])
             if rows:
