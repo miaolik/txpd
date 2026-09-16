@@ -1598,36 +1598,62 @@ async def handle_backup_account(event, match):
 
 @admin_handler(r"^频道导入账号(?:\s+.+)?$", ignore_at_check=True)
 async def handle_restore_account(event, match):
-    """从本地备份文件恢复账号数据。格式：频道导入账号 <备份文件名> [目标槽位名]"""
+    """从本地备份文件恢复账号数据。格式：频道导入账号 <槽位名或备份文件名> [目标槽位名]"""
     parts = _text(event).split(None, 2)
     
     if len(parts) < 2:
         # 列出可用的备份文件
         backup_files = sorted([f.name for f in BASE_DIR.glob("backup_*.zip")], reverse=True)
         if not backup_files:
-            await event.reply("未找到备份文件。\n\n使用「频道备份账号」创建备份。")
+            await event.reply("未找到备份文件。\n\n使用「频道备份账号 槽位名」创建备份。")
             return
         
         files_list = "\n".join([f"- {f}" for f in backup_files[:10]])
-        await event.reply(f"可用的备份文件：\n{files_list}\n\n使用方法：频道导入账号 <文件名> [目标槽位名]\n\n示例：频道导入账号 {backup_files[0]}")
+        await event.reply(f"可用的备份文件：\n{files_list}\n\n使用方法：\n1. 频道导入账号 <槽位名>\n2. 频道导入账号 <完整文件名> [目标槽位名]\n\n示例：频道导入账号 云")
         return
     
-    backup_filename = parts[1].strip()
+    input_name = parts[1].strip()
     target_name = parts[2].strip() if len(parts) > 2 else None
     
-    # 查找备份文件
-    backup_file = BASE_DIR / backup_filename
+    # 智能查找备份文件
+    backup_file = None
+    
+    # 1. 尝试作为完整文件名
+    if input_name.endswith('.zip'):
+        backup_file = BASE_DIR / input_name
+        if backup_file.exists():
+            # 如果没有指定目标槽位，使用输入名作为目标
+            if not target_name:
+                # 从文件名提取槽位名：backup_<槽位名>_<时间戳>.zip
+                match = re.match(r'backup_(.+?)_\d+\.zip', input_name)
+                if match:
+                    target_name = match.group(1)
+    
+    # 2. 尝试作为槽位名，查找最新的备份文件
+    if not backup_file or not backup_file.exists():
+        # 查找该槽位的所有备份文件
+        pattern = f"backup_{input_name}_*.zip"
+        matching_backups = sorted(BASE_DIR.glob(pattern), key=lambda f: f.stat().st_mtime, reverse=True)
+        if matching_backups:
+            backup_file = matching_backups[0]
+            # 如果没有指定目标槽位，默认导入到同名槽位
+            if not target_name:
+                target_name = input_name
+    
+    # 3. 尝试添加 backup_ 前缀
+    if not backup_file or not backup_file.exists():
+        backup_file = BASE_DIR / f"backup_{input_name}"
+        if not backup_file.exists() and not input_name.endswith('.zip'):
+            backup_file = BASE_DIR / f"backup_{input_name}.zip"
+    
     if not backup_file.exists():
-        # 尝试添加路径前缀
-        backup_file = BASE_DIR / f"backup_{backup_filename}"
-        if not backup_file.exists():
-            await event.reply(f"备份文件不存在: {backup_filename}\n\n发送「频道导入账号」查看可用的备份文件。")
-            return
+        await event.reply(f"备份文件不存在: {input_name}\n\n发送「频道导入账号」查看可用的备份文件。")
+        return
     
     try:
         zip_data = backup_file.read_bytes()
         ok, msg = await asyncio.to_thread(restore_account_data, zip_data, target_name)
-        await event.reply(msg)
+        await event.reply(f"{msg}\n\n使用的备份文件：{backup_file.name}")
         
         if ok:
             # 恢复成功后可选择删除备份文件
@@ -3892,7 +3918,7 @@ def _help_text() -> str:
             [_quick_cmd("频道切换账号 名称", "切换账号"), "切换当前操作的账号（登录/发帖等都作用在当前槽位）"],
             [_quick_cmd("频道账号状态 名称", "账号状态"), "查看指定槽位的登录状态"],
             [_quick_cmd("频道备份账号 名称", "备份账号"), "备份账号数据（不含日志），生成 ZIP 文件"],
-            [_quick_cmd("频道导入账号 名称", "导入账号"), "从备份 ZIP 文件恢复账号数据"],
+            [_quick_cmd("频道导入账号 名称", "导入账号"), "从最新备份恢复账号（自动查找该槽位的备份）"],
         ]),
         "## 登录与通知（Skill 1.1.5）",
         *_table(["命令", "说明"], [
