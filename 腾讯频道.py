@@ -3548,6 +3548,8 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
                     for reply in replies[:3]:  # 最多显示3条预加载回复
                         if not isinstance(reply, dict):
                             continue
+                        reply_id = reply.get("reply_id") or reply.get("replyId")
+                        reply_author_id = _comment_author_id(reply)
                         reply_nick = _comment_nick(reply) or "未知用户"
                         reply_content = reply.get("content")
                         if isinstance(reply_content, dict):
@@ -3560,7 +3562,24 @@ def _render_summary(title: str, data: Dict[str, Any], guild_id: Optional[str] = 
                         reply_display = reply_display or "-"
                         if len(reply_display) > 50:
                             reply_display = reply_display[:50] + "..."
-                        rows.append([f"  ↳ {_truncate_display_text(reply_nick, 10)}", reply_display, ""])
+                        
+                        # 为回复生成操作按钮
+                        reply_ops = []
+                        if item_feed_id and cid and reply_id and feed_author_id and item_feed_create_time and comment_author_id and reply_author_id:
+                            like_token = _save_token_payload("reply_like", {
+                                "feed_id": item_feed_id,
+                                "comment_id": cid,
+                                "reply_id": reply_id,
+                                "feed_author_id": feed_author_id,
+                                "feed_create_time": item_feed_create_time,
+                                "comment_author_id": comment_author_id,
+                                "reply_author_id": reply_author_id,
+                                "guild_id": item_guild_id,
+                                "channel_id": channel_id,
+                            })
+                            reply_ops.append(_quick_cmd(f"回复点赞 {like_token}", "点赞"))
+                        
+                        rows.append([f"  ↳ {_truncate_display_text(reply_nick, 10)}", reply_display, " / ".join(reply_ops) if reply_ops else ""])
             if rows:
                 lines.extend(_table(["作者", "内容", "操作"], rows))
         attach_info = payload.get("attach_info") or payload.get("next_page_cookie") or payload.get("attachinfo")
