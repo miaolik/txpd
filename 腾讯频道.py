@@ -1591,7 +1591,7 @@ async def handle_backup_account(event, match):
     backup_file = BASE_DIR / f"backup_{name or get_current_user()}_{int(time.time())}.zip"
     try:
         backup_file.write_bytes(zip_data)
-        await event.reply(f"{msg}\n备份文件：{backup_file.name}\n\n请下载此文件保存，导入时使用「频道导入账号 <槽位名>」命令并上传备份文件。")
+        await event.reply(f"{msg}\n备份文件：{backup_file.name}\n\n导入时使用「频道导入账号 {name or get_current_user()}」命令即可恢复。")
     except Exception as exc:
         await event.reply(f"保存备份文件失败: {exc}")
 
