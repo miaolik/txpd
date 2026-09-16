@@ -1960,7 +1960,7 @@ def _read_plugin_settings() -> Dict[str, Any]:
     legacy_preview = _read_json_file(BASE_DIR / "preview_settings.json", {})
     legacy_debug = _read_json_file(BASE_DIR / "debug_settings.json", {})
     merged = {
-        "preview_enabled": bool(legacy_preview.get("__global__", True)),
+        "preview_enabled": bool(legacy_preview.get("__global__", False)),
         "debug_enabled": bool(legacy_debug.get("__global__", False)),
     }
     _write_json_file(PLUGIN_SETTINGS, merged)
