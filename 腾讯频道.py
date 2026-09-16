@@ -22,6 +22,7 @@ from core.plugin.decorators import handler
 
 
 BASE_DIR = Path(__file__).resolve().parent
+BACKUP_DIR = BASE_DIR.parent  # 备份文件保存在插件的上一级目录
 IS_WINDOWS = sys.platform.startswith("win")
 LOCAL_NPM_DIR = BASE_DIR / ".cli" / "node_modules"
 LOCAL_CLI_BINS = (
@@ -1587,8 +1588,8 @@ async def handle_backup_account(event, match):
         await event.reply(msg)
         return
     
-    # 保存到临时文件
-    backup_file = BASE_DIR / f"backup_{name or get_current_user()}_{int(time.time())}.zip"
+    # 保存到上一级目录
+    backup_file = BACKUP_DIR / f"backup_{name or get_current_user()}_{int(time.time())}.zip"
     try:
         backup_file.write_bytes(zip_data)
         await event.reply(f"{msg}\n备份文件：{backup_file.name}\n\n导入时使用「频道导入账号 {name or get_current_user()}」命令即可恢复。")
@@ -1603,7 +1604,7 @@ async def handle_restore_account(event, match):
     
     if len(parts) < 2:
         # 列出可用的备份文件
-        backup_files = sorted([f.name for f in BASE_DIR.glob("backup_*.zip")], reverse=True)
+        backup_files = sorted([f.name for f in BACKUP_DIR.glob("backup_*.zip")], reverse=True)
         if not backup_files:
             await event.reply("未找到备份文件。\n\n使用「频道备份账号 槽位名」创建备份。")
             return
@@ -1620,7 +1621,7 @@ async def handle_restore_account(event, match):
     
     # 1. 尝试作为完整文件名
     if input_name.endswith('.zip'):
-        backup_file = BASE_DIR / input_name
+        backup_file = BACKUP_DIR / input_name
         if backup_file.exists():
             # 如果没有指定目标槽位，使用输入名作为目标
             if not target_name:
@@ -1633,7 +1634,7 @@ async def handle_restore_account(event, match):
     if not backup_file or not backup_file.exists():
         # 查找该槽位的所有备份文件
         pattern = f"backup_{input_name}_*.zip"
-        matching_backups = sorted(BASE_DIR.glob(pattern), key=lambda f: f.stat().st_mtime, reverse=True)
+        matching_backups = sorted(BACKUP_DIR.glob(pattern), key=lambda f: f.stat().st_mtime, reverse=True)
         if matching_backups:
             backup_file = matching_backups[0]
             # 如果没有指定目标槽位，默认导入到同名槽位
@@ -1642,9 +1643,9 @@ async def handle_restore_account(event, match):
     
     # 3. 尝试添加 backup_ 前缀
     if not backup_file or not backup_file.exists():
-        backup_file = BASE_DIR / f"backup_{input_name}"
+        backup_file = BACKUP_DIR / f"backup_{input_name}"
         if not backup_file.exists() and not input_name.endswith('.zip'):
-            backup_file = BASE_DIR / f"backup_{input_name}.zip"
+            backup_file = BACKUP_DIR / f"backup_{input_name}.zip"
     
     if not backup_file.exists():
         await event.reply(f"备份文件不存在: {input_name}\n\n发送「频道导入账号」查看可用的备份文件。")
